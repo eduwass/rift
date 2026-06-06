@@ -1084,19 +1084,6 @@ impl LayoutEngine {
         None
     }
 
-    fn workspace_command_operation_space(
-        &self,
-        window_store: &WindowStore,
-        fallback_space: SpaceId,
-    ) -> SpaceId {
-        self.focused_window
-            .and_then(|wid| {
-                self.virtual_workspace_manager
-                    .space_for_window_any(window_store, wid)
-                    .or_else(|| self.space_with_window(wid))
-            })
-            .unwrap_or(fallback_space)
-    }
 
     fn active_workspace_id_and_name(
         &self,
@@ -2269,7 +2256,6 @@ impl LayoutEngine {
     ) -> EventResponse {
         match command {
             LayoutCommand::NextWorkspace(skip_empty) => {
-                let space = self.workspace_command_operation_space(window_store, space);
                 if let Some(current_workspace) =
                     self.virtual_workspace_manager.active_workspace(space)
                 {
@@ -2285,7 +2271,6 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::PrevWorkspace(skip_empty) => {
-                let space = self.workspace_command_operation_space(window_store, space);
                 if let Some(current_workspace) =
                     self.virtual_workspace_manager.active_workspace(space)
                 {
@@ -2301,7 +2286,6 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::SwitchToWorkspace(workspace_index) => {
-                let space = self.workspace_command_operation_space(window_store, space);
                 self.switch_to_workspace(window_store, space, *workspace_index, None)
             }
             LayoutCommand::MoveWindowToWorkspace {
@@ -2437,7 +2421,6 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::SwitchToLastWorkspace => {
-                let space = self.workspace_command_operation_space(window_store, space);
                 if let Some(last_workspace) = self.virtual_workspace_manager.last_workspace(space) {
                     return self.activate_workspace(window_store, space, last_workspace, None);
                 }
