@@ -663,6 +663,16 @@ impl VirtualWorkspaceManager {
         })
     }
 
+    pub fn space_for_window_any(&self, window_id: WindowId) -> Option<SpaceId> {
+        self.window_to_workspace.iter().find_map(|((space, wid), _)| {
+            if *wid == window_id {
+                Some(*space)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn workspaces_for_window(&self, window_id: WindowId) -> Vec<VirtualWorkspaceId> {
         let mut ids = HashSet::default();
         for ((_, wid), ws_id) in self.window_to_workspace.iter() {
@@ -817,6 +827,37 @@ impl VirtualWorkspaceManager {
         CGRect::new(hidden_point, original_size)
     }
 
+    fn hidden_rect_for_global_bounds(
+        screen_frame: CGRect,
+        original_size: CGSize,
+        corner: HideCorner,
+        other_screens: &[CGRect],
+    ) -> CGRect {
+        let global_min_x = other_screens
+            .iter()
+            .map(|screen| screen.origin.x)
+            .fold(screen_frame.origin.x, f64::min);
+        let global_max_x = other_screens
+            .iter()
+            .map(|screen| screen.max().x)
+            .fold(screen_frame.max().x, f64::max);
+        let global_max_y = other_screens
+            .iter()
+            .map(|screen| screen.max().y)
+            .fold(screen_frame.max().y, f64::max);
+        let offscreen_pad = 50.0;
+
+        let hidden_point = match corner {
+            HideCorner::BottomLeft => CGPoint::new(
+                global_min_x - original_size.width - offscreen_pad,
+                global_max_y + offscreen_pad,
+            ),
+            HideCorner::BottomRight => CGPoint::new(global_max_x + offscreen_pad, global_max_y + offscreen_pad),
+        };
+
+        CGRect::new(hidden_point, original_size)
+    }
+
     fn intersection_area(a: CGRect, b: CGRect) -> f64 {
         let w: f64 = (a.max().x.min(b.max().x) - a.origin.x.max(b.origin.x)).max(0.0);
         let h: f64 = (a.max().y.min(b.max().y) - a.origin.y.max(b.origin.y)).max(0.0);
@@ -831,52 +872,37 @@ impl VirtualWorkspaceManager {
         app_bundle_id: Option<&str>,
         other_screens: &[CGRect],
     ) -> CGRect {
+        if !other_screens.is_empty() {
+            return Self::hidden_rect_for_global_bounds(
+                screen_frame,
+                original_size,
+                corner,
+                other_screens,
+            );
+        }
+
         const MIN_ANCHOR_AREA: f64 = 1.0;
-        let primary =
-            Self::hidden_rect_for_corner(screen_frame, original_size, corner, app_bundle_id);
-        let fallback = Self::hidden_rect_for_corner(
-            screen_frame,
-            original_size,
-            corner.opposite(),
-            app_bundle_id,
-        );
-
-        let primary_anchor = Self::intersection_area(screen_frame, primary);
-        let fallback_anchor = Self::intersection_area(screen_frame, fallback);
-        let primary_anchored = primary_anchor >= MIN_ANCHOR_AREA;
-        let fallback_anchored = fallback_anchor >= MIN_ANCHOR_AREA;
-
-        let mut primary_other_max: f64 = 0.0;
-        let mut fallback_other_max: f64 = 0.0;
-        for screen in other_screens {
-            primary_other_max = primary_other_max.max(Self::intersection_area(*screen, primary));
-            fallback_other_max = fallback_other_max.max(Self::intersection_area(*screen, fallback));
-        }
-
-        match (primary_anchored, fallback_anchored) {
-            (true, false) => primary,
-            (false, true) => fallback,
-            (true, true) => {
-                if (primary_other_max - fallback_other_max).abs() > f64::EPSILON {
-                    if primary_other_max < fallback_other_max {
-                        primary
-                    } else {
-                        fallback
-                    }
-                } else if primary_anchor <= fallback_anchor {
-                    primary
-                } else {
-                    fallback
-                }
-            }
-            (false, false) => {
-                if primary_other_max <= fallback_other_max {
-                    primary
-                } else {
-                    fallback
-                }
-            }
-        }
+        [corner, corner.opposite()]
+        .into_iter()
+        .map(|candidate| {
+            let rect =
+                Self::hidden_rect_for_corner(screen_frame, original_size, candidate, app_bundle_id);
+            let anchor = Self::intersection_area(screen_frame, rect);
+            let other_max = other_screens
+                .iter()
+                .map(|screen| Self::intersection_area(*screen, rect))
+                .fold(0.0_f64, f64::max);
+            (rect, anchor >= MIN_ANCHOR_AREA, other_max, anchor)
+        })
+        .min_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.2.total_cmp(&b.2))
+                .then_with(|| a.3.total_cmp(&b.3))
+        })
+        .map(|(rect, _, _, _)| rect)
+        .unwrap_or_else(|| {
+            Self::hidden_rect_for_corner(screen_frame, original_size, corner, app_bundle_id)
+        })
     }
 
     pub fn calculate_hidden_position(
