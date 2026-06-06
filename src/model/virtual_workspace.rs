@@ -599,6 +599,14 @@ impl WorkspaceStore {
         window_store.workspace_info_for_window(window_id)
     }
 
+    pub fn space_for_window_any(
+        &self,
+        window_store: &WindowStore,
+        window_id: WindowId,
+    ) -> Option<SpaceId> {
+        window_store.workspace_info_for_window(window_id).map(|info| info.space)
+    }
+
     pub fn workspaces_for_window(
         &self,
         window_store: &WindowStore,
