@@ -2049,7 +2049,6 @@ impl LayoutEngine {
     ) -> EventResponse {
         match command {
             LayoutCommand::NextWorkspace(skip_empty) => {
-                let space = self.workspace_command_operation_space(space);
                 if let Some(current_workspace) =
                     self.virtual_workspace_manager.active_workspace(space)
                 {
@@ -2071,7 +2070,6 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::PrevWorkspace(skip_empty) => {
-                let space = self.workspace_command_operation_space(space);
                 if let Some(current_workspace) =
                     self.virtual_workspace_manager.active_workspace(space)
                 {
@@ -2093,7 +2091,6 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::SwitchToWorkspace(workspace_index) => {
-                let space = self.workspace_command_operation_space(space);
                 let workspaces = self.virtual_workspace_manager_mut().list_workspaces(space);
                 if let Some((workspace_id, _)) = workspaces.get(*workspace_index) {
                     let workspace_id = *workspace_id;
