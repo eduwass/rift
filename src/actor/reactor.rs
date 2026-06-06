@@ -2780,8 +2780,8 @@ impl Reactor {
     fn workspace_command_space(&self) -> Option<SpaceId> {
         let candidate = self
             .main_window_space()
-            .or_else(|| get_active_space_number())
             .or_else(|| self.space_for_cursor_screen())
+            .or_else(|| get_active_space_number())
             .or_else(|| self.space_manager.first_known_space());
 
         candidate.filter(|space| self.is_space_active(*space))
