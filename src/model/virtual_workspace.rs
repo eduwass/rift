@@ -139,6 +139,8 @@ impl VirtualWorkspace {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HideCorner {
+    TopLeft,
+    TopRight,
     BottomLeft,
     #[default]
     BottomRight,
@@ -147,6 +149,8 @@ pub enum HideCorner {
 impl HideCorner {
     pub fn opposite(self) -> Self {
         match self {
+            HideCorner::TopLeft => HideCorner::TopRight,
+            HideCorner::TopRight => HideCorner::TopLeft,
             HideCorner::BottomLeft => HideCorner::BottomRight,
             HideCorner::BottomRight => HideCorner::BottomLeft,
         }
@@ -796,18 +800,36 @@ impl VirtualWorkspaceManager {
             match bundle_id {
                 "us.zoom.xos" => CGPoint::new(0.0, 0.0),
                 _ => match corner {
+                    HideCorner::TopLeft => CGPoint::new(1.0, 1.0),
+                    HideCorner::TopRight => CGPoint::new(1.0, -1.0),
                     HideCorner::BottomLeft => CGPoint::new(1.0, -1.0),
                     HideCorner::BottomRight => CGPoint::new(1.0, 1.0),
                 },
             }
         } else {
             match corner {
+                HideCorner::TopLeft => CGPoint::new(1.0, 1.0),
+                HideCorner::TopRight => CGPoint::new(1.0, -1.0),
                 HideCorner::BottomLeft => CGPoint::new(1.0, -1.0),
                 HideCorner::BottomRight => CGPoint::new(1.0, 1.0),
             }
         };
 
         let hidden_point = match corner {
+            HideCorner::TopLeft => {
+                let top_left = screen_frame.origin;
+                CGPoint::new(
+                    top_left.x + one_pixel_offset.x - original_size.width + 1.0,
+                    top_left.y + one_pixel_offset.y - original_size.height + 1.0,
+                )
+            }
+            HideCorner::TopRight => {
+                let top_right = CGPoint::new(screen_frame.max().x, screen_frame.origin.y);
+                CGPoint::new(
+                    top_right.x - one_pixel_offset.x - 1.0,
+                    top_right.y + one_pixel_offset.y - original_size.height + 1.0,
+                )
+            }
             HideCorner::BottomLeft => {
                 let bottom_left = CGPoint::new(screen_frame.origin.x, screen_frame.max().y);
                 CGPoint::new(
@@ -827,37 +849,6 @@ impl VirtualWorkspaceManager {
         CGRect::new(hidden_point, original_size)
     }
 
-    fn hidden_rect_for_global_bounds(
-        screen_frame: CGRect,
-        original_size: CGSize,
-        corner: HideCorner,
-        other_screens: &[CGRect],
-    ) -> CGRect {
-        let global_min_x = other_screens
-            .iter()
-            .map(|screen| screen.origin.x)
-            .fold(screen_frame.origin.x, f64::min);
-        let global_max_x = other_screens
-            .iter()
-            .map(|screen| screen.max().x)
-            .fold(screen_frame.max().x, f64::max);
-        let global_max_y = other_screens
-            .iter()
-            .map(|screen| screen.max().y)
-            .fold(screen_frame.max().y, f64::max);
-        let offscreen_pad = 50.0;
-
-        let hidden_point = match corner {
-            HideCorner::BottomLeft => CGPoint::new(
-                global_min_x - original_size.width - offscreen_pad,
-                global_max_y + offscreen_pad,
-            ),
-            HideCorner::BottomRight => CGPoint::new(global_max_x + offscreen_pad, global_max_y + offscreen_pad),
-        };
-
-        CGRect::new(hidden_point, original_size)
-    }
-
     fn intersection_area(a: CGRect, b: CGRect) -> f64 {
         let w: f64 = (a.max().x.min(b.max().x) - a.origin.x.max(b.origin.x)).max(0.0);
         let h: f64 = (a.max().y.min(b.max().y) - a.origin.y.max(b.origin.y)).max(0.0);
@@ -872,17 +863,13 @@ impl VirtualWorkspaceManager {
         app_bundle_id: Option<&str>,
         other_screens: &[CGRect],
     ) -> CGRect {
-        if !other_screens.is_empty() {
-            return Self::hidden_rect_for_global_bounds(
-                screen_frame,
-                original_size,
-                corner,
-                other_screens,
-            );
-        }
-
         const MIN_ANCHOR_AREA: f64 = 1.0;
-        [corner, corner.opposite()]
+        [
+            corner,
+            corner.opposite(),
+            HideCorner::TopRight,
+            HideCorner::TopLeft,
+        ]
         .into_iter()
         .map(|candidate| {
             let rect =
