@@ -47,7 +47,7 @@ impl DragEventHandler {
                     &visible_space_centers,
                     LayoutCommand::SwapWindows(dragged_wid, target_wid),
                 );
-                reactor.handle_layout_response(response, None);
+                reactor.handle_layout_response(response, None, false);
 
                 need_layout_refresh = true;
             }

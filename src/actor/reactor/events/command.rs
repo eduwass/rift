@@ -142,7 +142,7 @@ impl CommandEventHandler {
             }
         };
 
-        reactor.handle_layout_response(response, workspace_space);
+        reactor.handle_layout_response(response, workspace_space, false);
         if requires_workspace_space {
             reactor.update_event_tap_layout_mode();
         }
@@ -529,7 +529,7 @@ impl CommandEventHandler {
             window_id,
         );
 
-        reactor.handle_layout_response(response, None);
+        reactor.handle_layout_response(response, None, false);
         reactor.send_layout_event(LayoutEvent::WindowFocused(target_space, window_id));
 
         let _ = reactor.update_layout_or_warn(false, false);
