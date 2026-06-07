@@ -906,11 +906,12 @@ impl VirtualWorkspaceManager {
         has_left && has_right
     }
 
-    fn hidden_bottom_strip_rect(screen_frame: CGRect, original_size: CGSize) -> CGRect {
+    fn hidden_bottom_strip_rect(screen_frame: CGRect, _original_size: CGSize) -> CGRect {
         const STRIP_HEIGHT: f64 = 1.0;
+        let hidden_size = CGSize::new(1.0, 1.0);
         CGRect::new(
             CGPoint::new(screen_frame.origin.x, screen_frame.max().y - STRIP_HEIGHT),
-            original_size,
+            hidden_size,
         )
     }
 
@@ -1914,7 +1915,8 @@ mod tests {
         );
 
         let built_in_area = VirtualWorkspaceManager::intersection_area(built_in, hidden);
-        assert!(built_in_area <= 50_000.0, "hidden={hidden:?} built_in_area={built_in_area}");
+        assert_eq!(hidden.size, CGSize::new(1.0, 1.0));
+        assert!(built_in_area <= 1.0, "hidden={hidden:?} built_in_area={built_in_area}");
         assert_eq!(VirtualWorkspaceManager::intersection_area(lg, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
@@ -1936,7 +1938,8 @@ mod tests {
         );
 
         let built_in_area = VirtualWorkspaceManager::intersection_area(built_in, hidden);
-        assert!(built_in_area <= 50_000.0, "hidden={hidden:?} built_in_area={built_in_area}");
+        assert_eq!(hidden.size, CGSize::new(1.0, 1.0));
+        assert!(built_in_area <= 1.0, "hidden={hidden:?} built_in_area={built_in_area}");
         assert_eq!(VirtualWorkspaceManager::intersection_area(lg, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
