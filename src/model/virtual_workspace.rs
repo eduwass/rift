@@ -907,7 +907,7 @@ impl VirtualWorkspaceManager {
     }
 
     fn hidden_bottom_strip_rect(screen_frame: CGRect, original_size: CGSize) -> CGRect {
-        const STRIP_HEIGHT: f64 = 10.0;
+        const STRIP_HEIGHT: f64 = 1.0;
         CGRect::new(
             CGPoint::new(screen_frame.origin.x, screen_frame.max().y - STRIP_HEIGHT),
             original_size,
