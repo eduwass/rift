@@ -869,6 +869,32 @@ impl VirtualWorkspaceManager {
         CGRect::new(hidden_point, original_size)
     }
 
+    fn hidden_edge_rects(screen_frame: CGRect, original_size: CGSize) -> [CGRect; 4] {
+        let right = CGRect::new(
+            CGPoint::new(screen_frame.max().x - 1.0, screen_frame.origin.y),
+            original_size,
+        );
+        let left = CGRect::new(
+            CGPoint::new(
+                screen_frame.origin.x - original_size.width + 1.0,
+                screen_frame.origin.y,
+            ),
+            original_size,
+        );
+        let top = CGRect::new(
+            CGPoint::new(
+                screen_frame.origin.x,
+                screen_frame.origin.y - original_size.height + 1.0,
+            ),
+            original_size,
+        );
+        let bottom = CGRect::new(
+            CGPoint::new(screen_frame.origin.x, screen_frame.max().y - 1.0),
+            original_size,
+        );
+        [right, left, top, bottom]
+    }
+
     fn intersection_area(a: CGRect, b: CGRect) -> f64 {
         let w: f64 = (a.max().x.min(b.max().x) - a.origin.x.max(b.origin.x)).max(0.0);
         let h: f64 = (a.max().y.min(b.max().y) - a.origin.y.max(b.origin.y)).max(0.0);
@@ -884,7 +910,7 @@ impl VirtualWorkspaceManager {
         other_screens: &[CGRect],
     ) -> CGRect {
         const MIN_ANCHOR_AREA: f64 = 1.0;
-        [
+        let corner_candidates = [
             corner,
             corner.opposite(),
             HideCorner::TopRight,
@@ -900,16 +926,29 @@ impl VirtualWorkspaceManager {
                 .map(|screen| Self::intersection_area(*screen, rect))
                 .fold(0.0_f64, f64::max);
             (rect, anchor >= MIN_ANCHOR_AREA, other_max, anchor)
-        })
-        .min_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| a.2.total_cmp(&b.2))
-                .then_with(|| a.3.total_cmp(&b.3))
-        })
-        .map(|(rect, _, _, _)| rect)
-        .unwrap_or_else(|| {
-            Self::hidden_rect_for_corner(screen_frame, original_size, corner, app_bundle_id)
-        })
+        });
+
+        let edge_candidates =
+            Self::hidden_edge_rects(screen_frame, original_size).into_iter().map(|rect| {
+                let anchor = Self::intersection_area(screen_frame, rect);
+                let other_max = other_screens
+                    .iter()
+                    .map(|screen| Self::intersection_area(*screen, rect))
+                    .fold(0.0_f64, f64::max);
+                (rect, anchor >= MIN_ANCHOR_AREA, other_max, anchor)
+            });
+
+        edge_candidates
+            .chain(corner_candidates)
+            .min_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| a.2.total_cmp(&b.2))
+                    .then_with(|| a.3.total_cmp(&b.3))
+            })
+            .map(|(rect, _, _, _)| rect)
+            .unwrap_or_else(|| {
+                Self::hidden_rect_for_corner(screen_frame, original_size, corner, app_bundle_id)
+            })
     }
 
     pub fn calculate_hidden_position(
@@ -1707,6 +1746,27 @@ mod tests {
         manager.set_active_workspace(space, ws2_id);
         assert!(!is_window_visible(&manager, window1, space));
         assert!(is_window_visible(&manager, window2, space));
+    }
+
+    #[test]
+    fn hidden_position_avoids_adjacent_displays_below() {
+        let manager = VirtualWorkspaceManager::new();
+        let lg = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3072.0, 1296.0));
+        let duet = CGRect::new(CGPoint::new(-739.0, 1296.0), CGSize::new(1366.0, 1024.0));
+        let built_in = CGRect::new(CGPoint::new(690.0, 1296.0), CGSize::new(1680.0, 1050.0));
+        let sidecar = CGRect::new(CGPoint::new(2370.0, 1296.0), CGSize::new(1366.0, 1024.0));
+        let hidden = manager.calculate_hidden_position_multi(
+            lg,
+            CGSize::new(3052.0, 1252.0),
+            HideCorner::BottomRight,
+            None,
+            &[lg, duet, built_in, sidecar],
+        );
+
+        assert!(VirtualWorkspaceManager::intersection_area(lg, hidden) >= 1.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(built_in, hidden), 0.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
     }
 
     #[test]
