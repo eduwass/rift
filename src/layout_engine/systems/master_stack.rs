@@ -890,6 +890,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn rebalance(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
 
+    fn balance_sizes(&mut self, layout: LayoutId) {
+        self.rebalance(layout)
+    }
+
     fn toggle_tile_orientation(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
 }
 

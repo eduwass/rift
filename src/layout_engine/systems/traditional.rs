@@ -1086,6 +1086,27 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.rebalance_node(root)
     }
 
+    fn balance_sizes(&mut self, layout: LayoutId) {
+        let windows = self.visible_windows_in_layout(layout);
+        if windows.len() < 2 {
+            return;
+        }
+
+        for wid in &windows {
+            self.remove_window(*wid);
+        }
+
+        let root = self.root(layout);
+        self.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        for wid in windows {
+            self.add_window_under(layout, root, wid);
+        }
+        if let Some(first_child) = root.first_child(self.map()) {
+            self.select(first_child);
+        }
+        self.rebalance(layout);
+    }
+
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
         let node_a = match self.tree.data.window.node_for(layout, a) {
             Some(n) => n,
@@ -1570,16 +1591,27 @@ impl TraditionalLayoutSystem {
     fn rebalance_node(&mut self, node: NodeId) {
         let map = &self.tree.map;
         let children: Vec<_> = node.children(map).collect();
-        let count = children.len() as f32;
-        if count == 0.0 {
+        if children.is_empty() {
             return;
         }
-        self.tree.data.layout.info[node].total = count;
-        for &child in &children {
-            self.tree.data.layout.info[child].size = 1.0;
+
+        let weights: Vec<_> = children.iter().map(|&child| self.leaf_weight(child)).collect();
+        let total: f32 = weights.iter().sum();
+        self.tree.data.layout.info[node].total = total;
+        for (&child, weight) in children.iter().zip(weights) {
+            self.tree.data.layout.info[child].size = weight;
         }
         for child in children {
             self.rebalance_node(child);
+        }
+    }
+
+    fn leaf_weight(&self, node: NodeId) -> f32 {
+        let children: Vec<_> = node.children(self.map()).collect();
+        if children.is_empty() {
+            1.0
+        } else {
+            children.into_iter().map(|child| self.leaf_weight(child)).sum()
         }
     }
 

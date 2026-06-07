@@ -1646,6 +1646,10 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn rebalance(&mut self, _layout: LayoutId) {}
 
+    fn balance_sizes(&mut self, layout: LayoutId) {
+        self.rebalance(layout)
+    }
+
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
         let sel_snapshot = self.selection_of_layout(layout);
 

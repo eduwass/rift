@@ -230,6 +230,8 @@ enum LayoutCommands {
     /// Toggle centering of the selected column in scrolling layout.
     /// If invoked again on the same selection, centering is removed.
     CenterSelection,
+    /// Rebalance the active layout tree.
+    Rebalance,
 }
 
 #[derive(Subcommand)]
@@ -709,6 +711,9 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         }
         LayoutCommands::CenterSelection => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::CenterSelection,
+        ))),
+        LayoutCommands::Rebalance => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::Rebalance,
         ))),
     }
 }
