@@ -15,6 +15,17 @@ use crate::common::log::{MetricsCommand, handle_command};
 use crate::layout_engine::{EventResponse, LayoutCommand, LayoutEvent};
 use crate::sys::window_server::{self as window_server, WindowServerId};
 
+fn poke_border_for_window(window_server_id: Option<WindowServerId>) {
+    let Some(wsid) = window_server_id else { return };
+    let Some(home) = dirs::home_dir() else { return };
+    let state_dir = home.join(".local/state/rift");
+    let _ = std::fs::create_dir_all(&state_dir);
+    let _ = std::fs::write(state_dir.join("borders.target"), format!("{}\n", wsid.as_u32()));
+    let Ok(pid_text) = std::fs::read_to_string(state_dir.join("borders.pid")) else { return };
+    let Ok(pid) = pid_text.trim().parse::<nix::libc::pid_t>() else { return };
+    unsafe { nix::libc::kill(pid, nix::libc::SIGUSR1) };
+}
+
 pub struct CommandEventHandler;
 
 impl CommandEventHandler {
@@ -522,6 +533,12 @@ impl CommandEventHandler {
         reactor.send_layout_event(LayoutEvent::WindowFocused(target_space, window_id));
 
         let _ = reactor.update_layout_or_warn(false, false);
+        if let Some(window_center) = reactor.window_center_on_known_screen(window_id)
+            && let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref()
+        {
+            event_tap_tx.send(crate::actor::event_tap::Request::Warp(window_center));
+        }
+        poke_border_for_window(window_server_id);
     }
 
     pub fn handle_command_reactor_close_window(
