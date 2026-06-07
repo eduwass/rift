@@ -1023,7 +1023,14 @@ impl Reactor {
 
         let should_update_notifications = Self::should_update_notifications(&event);
 
+        let main_window_changed = match &event {
+            Event::ApplicationMainWindowChanged(_, Some(wid), Quiet::No) => Some(*wid),
+            _ => None,
+        };
         let raised_window = self.main_window_tracker.handle_event(&event);
+        if let Some(wid) = main_window_changed {
+            self.workspace_switch_manager.pending_workspace_mouse_warp = Some(wid);
+        }
         match event {
             Event::ApplicationLaunched {
                 pid,
@@ -1786,6 +1793,9 @@ impl Reactor {
                     .is_some_and(|state| state.matches_filter(WindowFilter::EffectivelyManageable))
                 {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
+                    self.send_layout_event(LayoutEvent::WindowFocused(space, window));
+                    self.workspace_switch_manager.pending_workspace_mouse_warp = Some(window);
+                    self.raise_window(window, Quiet::No, None);
                 }
             }
         }

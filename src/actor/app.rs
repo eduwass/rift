@@ -982,7 +982,7 @@ impl State {
                 // merely live on another space. This fallback therefore only prunes
                 // windows whose AX element has actually gone invalid.
                 self.remove_stale_windows();
-                self.on_main_window_changed(None, false);
+                self.on_main_window_changed(None, true);
             }
             AxNotificationKind::WindowCreated => {
                 if self.id(&elem).is_ok() {
