@@ -67,7 +67,9 @@ pub(crate) struct FullscreenSpaceTrack {
 }
 
 impl Default for FullscreenSpaceTrack {
-    fn default() -> Self { FullscreenSpaceTrack { windows: Vec::new() } }
+    fn default() -> Self {
+        FullscreenSpaceTrack { windows: Vec::new() }
+    }
 }
 
 #[derive(Debug, Clone)]

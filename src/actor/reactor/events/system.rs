@@ -63,10 +63,10 @@ impl SystemEventHandler {
     }
 
     pub fn handle_raise_completed(reactor: &mut Reactor, window_id: WindowId, sequence_id: u64) {
-        send_raise_event(reactor, raise_manager::Event::RaiseCompleted {
-            window_id,
-            sequence_id,
-        });
+        send_raise_event(
+            reactor,
+            raise_manager::Event::RaiseCompleted { window_id, sequence_id },
+        );
     }
 
     pub fn handle_raise_timeout(reactor: &mut Reactor, sequence_id: u64) {

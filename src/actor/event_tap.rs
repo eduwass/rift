@@ -43,9 +43,9 @@ use crate::sys::hotkey::{
     Modifiers, is_modifier_key, key_code_from_event, modifier_flag_for_key,
     modifiers_from_flags_with_keys,
 };
+use crate::sys::power;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::{self, WindowServerId};
-use crate::sys::power;
 use crate::ui::stack_line::point_hits_indicator_frame;
 
 const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 8_000_000; // 8ms ~= 125 Hz
@@ -149,7 +149,9 @@ unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
 
 impl EventTap {
     #[inline]
-    fn stack_line_hover_enabled(&self, state: &State) -> bool { state.stack_line_enabled }
+    fn stack_line_hover_enabled(&self, state: &State) -> bool {
+        state.stack_line_enabled
+    }
 
     #[inline]
     fn focus_follows_mouse_handler_enabled(state: &State) -> bool {
@@ -239,8 +241,7 @@ impl EventTap {
         let event_mask = build_event_mask(
             disable_hotkey.is_some(),
             state.event_processing_enabled
-                && (state.stack_line_enabled
-                    || Self::focus_follows_mouse_handler_enabled(&state)),
+                && (state.stack_line_enabled || Self::focus_follows_mouse_handler_enabled(&state)),
         );
         EventTap {
             events_tx,
@@ -291,8 +292,7 @@ impl EventTap {
         let watchdog = Timer::repeating(Duration::from_secs(5), Duration::from_secs(5));
 
         let mut merged = StreamExt::merge(
-            UnboundedReceiverStream::new(requests_rx)
-                .map(|(span, req)| (span, Tick::Request(req))),
+            UnboundedReceiverStream::new(requests_rx).map(|(span, req)| (span, Tick::Request(req))),
             watchdog.map(|()| (Span::none(), Tick::Watchdog)),
         );
 
@@ -473,7 +473,9 @@ impl EventTap {
         if let Some(tap) = self.tap.borrow().as_ref() {
             if tap.take_reenabled_flag() {
                 let mut state = self.state.borrow_mut();
-                debug!("Event tap was re-enabled; clearing pressed_keys to prevent phantom modifiers");
+                debug!(
+                    "Event tap was re-enabled; clearing pressed_keys to prevent phantom modifiers"
+                );
                 state.pressed_keys.clear();
                 state.current_flags = CGEvent::flags(Some(event));
                 state.reconcile_modifier_keys();
@@ -724,9 +726,13 @@ impl State {
             .and_then(|(_, space)| self.layout_mode_by_space.get(space).copied())
     }
 
-    fn note_key_down(&mut self, key_code: KeyCode) { self.pressed_keys.insert(key_code); }
+    fn note_key_down(&mut self, key_code: KeyCode) {
+        self.pressed_keys.insert(key_code);
+    }
 
-    fn note_key_up(&mut self, key_code: KeyCode) { self.pressed_keys.remove(&key_code); }
+    fn note_key_up(&mut self, key_code: KeyCode) {
+        self.pressed_keys.remove(&key_code);
+    }
 
     fn note_flags_changed(&mut self, key_code: KeyCode) {
         if !is_modifier_key(key_code) {
@@ -841,10 +847,7 @@ fn mouse_move_sampling_profile(low_power_mode: bool) -> (u64, f64) {
     }
 }
 
-fn build_event_mask(
-    keyboard_enabled: bool,
-    mouse_move_enabled: bool,
-) -> CGEventMask {
+fn build_event_mask(keyboard_enabled: bool, mouse_move_enabled: bool) -> CGEventMask {
     let mut m: u64 = 0;
     let add = |m: &mut u64, ty: CGEventType| *m |= 1u64 << (ty.0 as u64);
 

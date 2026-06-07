@@ -82,11 +82,17 @@ pub struct ReactorHandle {
 }
 
 impl ReactorHandle {
-    pub fn new(sender: Sender, queries: ReactorQueryHandle) -> Self { Self { sender, queries } }
+    pub fn new(sender: Sender, queries: ReactorQueryHandle) -> Self {
+        Self { sender, queries }
+    }
 
-    pub fn sender(&self) -> Sender { self.sender.clone() }
+    pub fn sender(&self) -> Sender {
+        self.sender.clone()
+    }
 
-    pub fn send(&self, event: Event) { self.sender.send(event) }
+    pub fn send(&self, event: Event) {
+        self.sender.send(event)
+    }
 
     pub fn try_send(
         &self,
@@ -99,7 +105,9 @@ impl ReactorHandle {
 impl std::ops::Deref for ReactorHandle {
     type Target = ReactorQueryHandle;
 
-    fn deref(&self) -> &Self::Target { &self.queries }
+    fn deref(&self) -> &Self::Target {
+        &self.queries
+    }
 }
 
 use display_topology::{DisplaySnapshot, DisplayTopologyManager, WindowSnapshot};
@@ -389,7 +397,9 @@ impl Reactor {
         }
     }
 
-    fn is_space_active(&self, space: SpaceId) -> bool { self.active_spaces.contains(&space) }
+    fn is_space_active(&self, space: SpaceId) -> bool {
+        self.active_spaces.contains(&space)
+    }
 
     fn iter_active_spaces(&self) -> impl Iterator<Item = SpaceId> + '_ {
         self.active_spaces.iter().copied()
@@ -411,7 +421,9 @@ impl Reactor {
         }
     }
 
-    fn screens_for_current_spaces(&self) -> Vec<ScreenInfo> { self.space_manager.screens.clone() }
+    fn screens_for_current_spaces(&self) -> Vec<ScreenInfo> {
+        self.space_manager.screens.clone()
+    }
 
     fn screens_for_spaces(&self, spaces: &[Option<SpaceId>]) -> Vec<ScreenInfo> {
         self.space_manager
@@ -2759,7 +2771,9 @@ impl Reactor {
         self.maybe_send_menu_update();
     }
 
-    fn force_refresh_all_windows(&mut self) { self.request_visible_windows_for_apps(true); }
+    fn force_refresh_all_windows(&mut self) {
+        self.request_visible_windows_for_apps(true);
+    }
 
     fn request_close_window(&mut self, wid: WindowId) {
         if let Some(app) = self.app_manager.apps.get(&wid.pid) {
@@ -2769,7 +2783,9 @@ impl Reactor {
         }
     }
 
-    fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
+    fn main_window(&self) -> Option<WindowId> {
+        self.main_window_tracker.main_window()
+    }
 
     fn main_window_space(&self) -> Option<SpaceId> {
         // TODO: Optimize this with a cache or something.
