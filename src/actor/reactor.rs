@@ -1965,11 +1965,17 @@ impl Reactor {
             trace!("Workspace switch stabilized with no further frame changes");
         }
 
-        // Execute deferred mouse warp after workspace switch completes
-        if let Some(wid) = self.workspace_switch_manager.pending_workspace_mouse_warp.take() {
+        // Execute deferred mouse warp only for command-driven workspace switches. Hover/focus
+        // churn can briefly look like a workspace switch and must never hijack physical mouse
+        // movement by recentering onto the focused window.
+        if self.workspace_switch_manager.manual_switch_in_progress()
+            && let Some(wid) = self.workspace_switch_manager.pending_workspace_mouse_warp.take()
+        {
             if let Some(window_center) = self.window_center_on_known_screen(wid) {
                 self.warp_mouse(window_center);
             }
+        } else {
+            self.workspace_switch_manager.pending_workspace_mouse_warp = None;
         }
 
         if outcome.refresh_window_notifications {
