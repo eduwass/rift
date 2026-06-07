@@ -519,6 +519,7 @@ impl CommandEventHandler {
         );
 
         reactor.handle_layout_response(response, None);
+        reactor.send_layout_event(LayoutEvent::WindowFocused(target_space, window_id));
 
         let _ = reactor.update_layout_or_warn(false, false);
     }
