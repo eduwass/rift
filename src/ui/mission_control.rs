@@ -283,7 +283,9 @@ impl MissionControlState {
         self.ensure_selection();
     }
 
-    fn mode(&self) -> Option<&MissionControlMode> { self.mode.as_ref() }
+    fn mode(&self) -> Option<&MissionControlMode> {
+        self.mode.as_ref()
+    }
 
     fn purge(&mut self) {
         self.mode = None;
@@ -314,7 +316,9 @@ impl MissionControlState {
         self.render_size = None;
     }
 
-    fn selection(&self) -> Option<Selection> { self.selection }
+    fn selection(&self) -> Option<Selection> {
+        self.selection
+    }
 
     fn set_selection(&mut self, selection: Selection) {
         let is_valid = match (selection, self.mode.as_ref()) {
@@ -1399,12 +1403,16 @@ impl MissionControlOverlay {
                     let src_h = window.info.frame.size.height.max(1.0);
 
                     let area = (src_w * src_h) as i64;
-                    pending.push((priority, area, CaptureTask {
-                        window_id: window.id,
-                        window_server_id: wsid,
-                        target_w: src_w as usize,
-                        target_h: src_h as usize,
-                    }));
+                    pending.push((
+                        priority,
+                        area,
+                        CaptureTask {
+                            window_id: window.id,
+                            window_server_id: wsid,
+                            target_w: src_w as usize,
+                            target_h: src_h as usize,
+                        },
+                    ));
                 };
 
                 match state_ref.mode() {
@@ -1700,9 +1708,13 @@ impl MissionControlOverlay {
         self.state.borrow_mut().on_action = Some(f);
     }
 
-    pub fn set_fade_enabled(&mut self, enabled: bool) { self.fade_enabled = enabled; }
+    pub fn set_fade_enabled(&mut self, enabled: bool) {
+        self.fade_enabled = enabled;
+    }
 
-    pub fn set_fade_duration_ms(&mut self, ms: f64) { self.fade_duration_ms = ms.max(0.0); }
+    pub fn set_fade_duration_ms(&mut self, ms: f64) {
+        self.fade_duration_ms = ms.max(0.0);
+    }
 
     fn current_screen_metrics(&self) -> (ScreenInfo, f64, CoordinateConverter) {
         if let Some((metrics, converter)) = self.gather_screen_metrics() {

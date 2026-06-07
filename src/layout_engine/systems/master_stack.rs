@@ -20,7 +20,9 @@ pub struct MasterStackLayoutSystem {
 }
 
 impl Default for MasterStackLayoutSystem {
-    fn default() -> Self { Self::new(MasterStackSettings::default()) }
+    fn default() -> Self {
+        Self::new(MasterStackSettings::default())
+    }
 }
 
 impl MasterStackLayoutSystem {
@@ -446,7 +448,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         cloned
     }
 
-    fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
+    fn remove_layout(&mut self, layout: LayoutId) {
+        self.inner.remove_layout(layout);
+    }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
         let root = self.inner.root(layout);
@@ -526,7 +530,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.visible_windows_under_selection(layout)
     }
 
-    fn ascend_selection(&mut self, layout: LayoutId) -> bool { self.inner.ascend_selection(layout) }
+    fn ascend_selection(&mut self, layout: LayoutId) -> bool {
+        self.inner.ascend_selection(layout)
+    }
 
     fn descend_selection(&mut self, layout: LayoutId) -> bool {
         self.inner.descend_selection(layout)
@@ -755,14 +761,20 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.parent_of_selection_is_stacked(layout)
     }
 
-    fn unjoin_selection(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    fn unjoin_selection(&mut self, layout: LayoutId) {
+        self.normalize_layout(layout);
+    }
 
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         let _ = amount;
         self.normalize_layout(layout);
     }
 
-    fn rebalance(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    fn rebalance(&mut self, layout: LayoutId) {
+        self.normalize_layout(layout);
+    }
 
-    fn toggle_tile_orientation(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    fn toggle_tile_orientation(&mut self, layout: LayoutId) {
+        self.normalize_layout(layout);
+    }
 }

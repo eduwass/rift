@@ -1114,7 +1114,9 @@ impl LayoutEngine {
         }
     }
 
-    pub fn debug_tree(&self, space: SpaceId) { self.debug_tree_desc(space, "", false); }
+    pub fn debug_tree(&self, space: SpaceId) {
+        self.debug_tree_desc(space, "", false);
+    }
 
     pub fn debug_tree_desc(&self, space: SpaceId, desc: &'static str, print: bool) {
         if let Some(workspace_id) = self.virtual_workspace_manager.active_workspace(space) {
@@ -2032,9 +2034,13 @@ impl LayoutEngine {
         ))
     }
 
-    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> { Ok(()) }
+    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> {
+        Ok(())
+    }
 
-    pub fn serialize_to_string(&self) -> String { ron::ser::to_string(&self).unwrap() }
+    pub fn serialize_to_string(&self) -> String {
+        ron::ser::to_string(&self).unwrap()
+    }
 
     #[cfg(test)]
     pub(crate) fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
@@ -2797,11 +2803,13 @@ mod tests {
         let _ = engine.virtual_workspace_manager_mut().list_workspaces(space);
         let _ = engine.virtual_workspace_manager_mut().auto_assign_window(window_id, space);
 
-        let response =
-            engine.handle_virtual_workspace_command(space, &LayoutCommand::SetWorkspaceLayout {
+        let response = engine.handle_virtual_workspace_command(
+            space,
+            &LayoutCommand::SetWorkspaceLayout {
                 workspace: Some(1),
                 mode: LayoutMode::Bsp,
-            });
+            },
+        );
 
         assert!(response.raise_windows.is_empty());
         assert_eq!(response.focus_window, None);

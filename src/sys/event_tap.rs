@@ -145,7 +145,9 @@ impl EventTap {
         unsafe { Self::new_with_options(CGTapOpt::ListenOnly, mask, callback, user_info, drop_ctx) }
     }
 
-    pub fn set_enabled(&self, enabled: bool) { CGEvent::tap_enable(&self.port, enabled); }
+    pub fn set_enabled(&self, enabled: bool) {
+        CGEvent::tap_enable(&self.port, enabled);
+    }
 
     /// Returns `true` if the tap was re-enabled since the last call, and
     /// atomically clears the flag. Used by the actor layer to detect that

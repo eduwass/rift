@@ -71,7 +71,9 @@ pub struct DisplayData {
 
 impl Serialize for WindowData {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         #[serde_as]
         #[derive(Serialize)]
         struct WindowDataSer<'a> {
@@ -103,7 +105,9 @@ impl Serialize for WindowData {
 
 impl<'de> Deserialize<'de> for WindowData {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         #[serde_as]
         #[derive(Deserialize)]
         struct WindowDataDe {
@@ -147,7 +151,9 @@ impl<'de> Deserialize<'de> for WindowData {
 
 impl Serialize for DisplayData {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         #[serde_as]
         #[derive(Serialize)]
         struct DisplayDataSer<'a> {
@@ -181,7 +187,9 @@ impl Serialize for DisplayData {
 
 impl<'de> Deserialize<'de> for DisplayData {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         #[serde_as]
         #[derive(Deserialize)]
         struct DisplayDataDe {

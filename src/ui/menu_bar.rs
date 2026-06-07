@@ -677,7 +677,9 @@ impl MenuActionHandler {
         unsafe { msg_send![super(this), init] }
     }
 
-    fn emit(&self, action: MenuAction) { let _ = self.ivars().action_tx.send(action); }
+    fn emit(&self, action: MenuAction) {
+        let _ = self.ivars().action_tx.send(action);
+    }
 }
 
 define_class!(

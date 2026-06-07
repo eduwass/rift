@@ -81,7 +81,9 @@ impl Drop for RiftMachSubscription {
 }
 
 impl RiftMachClient {
-    pub fn connect() -> Result<Self, String> { Ok(RiftMachClient { connected: true }) }
+    pub fn connect() -> Result<Self, String> {
+        Ok(RiftMachClient { connected: true })
+    }
 
     fn parse_response_buffer(response_buf: &[u8]) -> Result<RiftResponse, String> {
         let json_bytes = CStr::from_bytes_until_nul(response_buf)

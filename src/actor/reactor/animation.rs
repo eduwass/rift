@@ -139,7 +139,9 @@ fn ease(t: f64) -> f64 {
     }
 }
 
-fn blend(a: f64, b: f64, s: f64) -> f64 { (1.0 - s) * a + s * b }
+fn blend(a: f64, b: f64, s: f64) -> f64 {
+    (1.0 - s) * a + s * b
+}
 
 pub struct AnimationManager;
 

@@ -1461,10 +1461,13 @@ fn discovery_after_display_change_places_window_on_correct_display() {
     // expected behaviour.
     reactor.handle_event(Event::WindowsDiscovered {
         pid: 1,
-        new: vec![(WindowId::new(1, 1), WindowInfo {
-            frame: CGRect::new(CGPoint::new(1100., 100.), CGSize::new(50., 50.)),
-            ..make_window(1)
-        })],
+        new: vec![(
+            WindowId::new(1, 1),
+            WindowInfo {
+                frame: CGRect::new(CGPoint::new(1100., 100.), CGSize::new(50., 50.)),
+                ..make_window(1)
+            },
+        )],
         known_visible: vec![WindowId::new(1, 1)],
     });
     apps.simulate_until_quiet(&mut reactor);

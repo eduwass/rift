@@ -236,18 +236,26 @@ fn notify_ready_once(callback: &ActivationPolicyCallback, pid: pid_t, info: AppI
 }
 
 pub fn set_activation_policy_callback<F>(callback: F)
-where F: Fn(pid_t, AppInfo) + Send + Sync + 'static {
+where
+    F: Fn(pid_t, AppInfo) + Send + Sync + 'static,
+{
     *ACTIVATION_POLICY_CALLBACK.lock() = Some(Arc::new(callback));
 }
 
-pub fn clear_activation_policy_callback() { *ACTIVATION_POLICY_CALLBACK.lock() = None; }
+pub fn clear_activation_policy_callback() {
+    *ACTIVATION_POLICY_CALLBACK.lock() = None;
+}
 
 pub fn set_finished_launching_callback<F>(callback: F)
-where F: Fn(pid_t, AppInfo) + Send + Sync + 'static {
+where
+    F: Fn(pid_t, AppInfo) + Send + Sync + 'static,
+{
     *FINISHED_LAUNCHING_CALLBACK.lock() = Some(Arc::new(callback));
 }
 
-pub fn clear_finished_launching_callback() { *FINISHED_LAUNCHING_CALLBACK.lock() = None; }
+pub fn clear_finished_launching_callback() {
+    *FINISHED_LAUNCHING_CALLBACK.lock() = None;
+}
 
 pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
     let callback = ACTIVATION_POLICY_CALLBACK.lock().clone();
@@ -310,7 +318,9 @@ pub fn remove_finished_launching_observer(pid: pid_t) {
     }
 }
 
-pub fn clear_ready_callback_notified(pid: pid_t) { READY_CALLBACK_NOTIFIED.lock().remove(&pid); }
+pub fn clear_ready_callback_notified(pid: pid_t) {
+    READY_CALLBACK_NOTIFIED.lock().remove(&pid);
+}
 
 pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppInfo)> {
     let callback = ACTIVATION_POLICY_CALLBACK.lock().clone();
@@ -365,11 +375,17 @@ impl NSRunningApplicationExt for NSRunningApplication {
         NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
     }
 
-    fn pid(&self) -> pid_t { self.processIdentifier() }
+    fn pid(&self) -> pid_t {
+        self.processIdentifier()
+    }
 
-    fn bundle_id(&self) -> Option<Retained<NSString>> { self.bundleIdentifier() }
+    fn bundle_id(&self) -> Option<Retained<NSString>> {
+        self.bundleIdentifier()
+    }
 
-    fn localized_name(&self) -> Option<Retained<NSString>> { self.localizedName() }
+    fn localized_name(&self) -> Option<Retained<NSString>> {
+        self.localizedName()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

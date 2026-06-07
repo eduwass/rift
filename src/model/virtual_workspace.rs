@@ -85,11 +85,17 @@ impl VirtualWorkspace {
         }
     }
 
-    pub fn tree(&self) -> &LayoutSystemKind { &self.layout_system }
+    pub fn tree(&self) -> &LayoutSystemKind {
+        &self.layout_system
+    }
 
-    pub fn tree_mut(&mut self) -> &mut LayoutSystemKind { &mut self.layout_system }
+    pub fn tree_mut(&mut self) -> &mut LayoutSystemKind {
+        &mut self.layout_system
+    }
 
-    pub fn layout_mode(&self) -> LayoutMode { self.layout_mode }
+    pub fn layout_mode(&self) -> LayoutMode {
+        self.layout_mode
+    }
 
     pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
         match mode {
@@ -115,11 +121,17 @@ impl VirtualWorkspace {
         }
     }
 
-    pub fn contains_window(&self, window_id: WindowId) -> bool { self.windows.contains(&window_id) }
+    pub fn contains_window(&self, window_id: WindowId) -> bool {
+        self.windows.contains(&window_id)
+    }
 
-    pub fn windows(&self) -> impl Iterator<Item = WindowId> + '_ { self.windows.iter().copied() }
+    pub fn windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.windows.iter().copied()
+    }
 
-    pub fn add_window(&mut self, window_id: WindowId) { self.windows.insert(window_id); }
+    pub fn add_window(&mut self, window_id: WindowId) {
+        self.windows.insert(window_id);
+    }
 
     pub fn remove_window(&mut self, window_id: WindowId) -> bool {
         if self.last_focused == Some(window_id) {
@@ -132,9 +144,13 @@ impl VirtualWorkspace {
         self.last_focused = window_id;
     }
 
-    pub fn last_focused(&self) -> Option<WindowId> { self.last_focused }
+    pub fn last_focused(&self) -> Option<WindowId> {
+        self.last_focused
+    }
 
-    pub fn window_count(&self) -> usize { self.windows.len() }
+    pub fn window_count(&self) -> usize {
+        self.windows.len()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -193,7 +209,9 @@ pub struct VirtualWorkspaceManager {
 }
 
 impl Default for VirtualWorkspaceManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VirtualWorkspaceManager {
@@ -480,7 +498,9 @@ impl VirtualWorkspaceManager {
         })
     }
 
-    pub fn workspace_auto_back_and_forth(&self) -> bool { self.workspace_auto_back_and_forth }
+    pub fn workspace_auto_back_and_forth(&self) -> bool {
+        self.workspace_auto_back_and_forth
+    }
 
     pub fn set_active_workspace(
         &mut self,
@@ -1540,7 +1560,9 @@ impl FloatingWindowPositions {
         self.positions.remove(&window_id)
     }
 
-    fn windows(&self) -> impl Iterator<Item = WindowId> + '_ { self.positions.keys().copied() }
+    fn windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.positions.keys().copied()
+    }
 
     fn remove_app_windows(&mut self, pid: pid_t) {
         self.positions.retain(|window_id, _| window_id.pid != pid);

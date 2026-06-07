@@ -37,7 +37,9 @@ pub enum TopologyState {
 }
 
 impl Default for TopologyState {
-    fn default() -> Self { TopologyState::Stable }
+    fn default() -> Self {
+        TopologyState::Stable
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -56,7 +58,9 @@ pub struct DisplayTopologyManager {
 
 impl DisplayTopologyManager {
     #[cfg(test)]
-    pub(crate) fn state(&self) -> &TopologyState { &self.state }
+    pub(crate) fn state(&self) -> &TopologyState {
+        &self.state
+    }
 
     pub fn is_churning_or_awaiting_commit(&self) -> bool {
         matches!(
@@ -143,13 +147,21 @@ impl DisplayTopologyManager {
         }
     }
 
-    pub fn quarantine_appeared(&mut self) { self.quarantine_stats.appeared_dropped += 1; }
+    pub fn quarantine_appeared(&mut self) {
+        self.quarantine_stats.appeared_dropped += 1;
+    }
 
-    pub fn quarantine_destroyed(&mut self) { self.quarantine_stats.destroyed_dropped += 1; }
+    pub fn quarantine_destroyed(&mut self) {
+        self.quarantine_stats.destroyed_dropped += 1;
+    }
 
-    pub fn quarantine_resync(&mut self) { self.quarantine_stats.resync_dropped += 1; }
+    pub fn quarantine_resync(&mut self) {
+        self.quarantine_stats.resync_dropped += 1;
+    }
 
-    pub fn mark_stable(&mut self) { self.state = TopologyState::Stable; }
+    pub fn mark_stable(&mut self) {
+        self.state = TopologyState::Stable;
+    }
 }
 
 #[cfg(test)]
