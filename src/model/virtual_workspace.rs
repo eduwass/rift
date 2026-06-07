@@ -869,7 +869,7 @@ impl VirtualWorkspaceManager {
         CGRect::new(hidden_point, original_size)
     }
 
-    fn hidden_edge_rects(screen_frame: CGRect, original_size: CGSize) -> [CGRect; 4] {
+    fn hidden_edge_rects(screen_frame: CGRect, original_size: CGSize) -> [CGRect; 2] {
         let right = CGRect::new(
             CGPoint::new(screen_frame.max().x - 1.0, screen_frame.origin.y),
             original_size,
@@ -881,24 +881,37 @@ impl VirtualWorkspaceManager {
             ),
             original_size,
         );
-        let top = CGRect::new(
-            CGPoint::new(
-                screen_frame.origin.x,
-                screen_frame.origin.y - original_size.height + 1.0,
-            ),
-            original_size,
-        );
-        let bottom = CGRect::new(
-            CGPoint::new(screen_frame.origin.x, screen_frame.max().y - 1.0),
-            original_size,
-        );
-        [right, left, top, bottom]
+        [right, left]
     }
 
     fn intersection_area(a: CGRect, b: CGRect) -> f64 {
         let w: f64 = (a.max().x.min(b.max().x) - a.origin.x.max(b.origin.x)).max(0.0);
         let h: f64 = (a.max().y.min(b.max().y) - a.origin.y.max(b.origin.y)).max(0.0);
         w * h
+    }
+
+    fn is_horizontally_boxed_by_same_row_screens(
+        screen_frame: CGRect,
+        other_screens: &[CGRect],
+    ) -> bool {
+        let overlaps_y = |screen: &CGRect| {
+            screen.origin.y < screen_frame.max().y && screen.max().y > screen_frame.origin.y
+        };
+        let has_left = other_screens
+            .iter()
+            .any(|screen| overlaps_y(screen) && screen.max().x <= screen_frame.origin.x);
+        let has_right = other_screens
+            .iter()
+            .any(|screen| overlaps_y(screen) && screen.origin.x >= screen_frame.max().x);
+        has_left && has_right
+    }
+
+    fn hidden_bottom_strip_rect(screen_frame: CGRect, original_size: CGSize) -> CGRect {
+        const STRIP_HEIGHT: f64 = 10.0;
+        CGRect::new(
+            CGPoint::new(screen_frame.origin.x, screen_frame.max().y - STRIP_HEIGHT),
+            original_size,
+        )
     }
 
     fn choose_hidden_position(
@@ -910,6 +923,10 @@ impl VirtualWorkspaceManager {
         other_screens: &[CGRect],
     ) -> CGRect {
         const MIN_ANCHOR_AREA: f64 = 1.0;
+        if Self::is_horizontally_boxed_by_same_row_screens(screen_frame, other_screens) {
+            return Self::hidden_bottom_strip_rect(screen_frame, original_size);
+        }
+
         let corner_candidates = [
             corner,
             corner.opposite(),
@@ -1790,8 +1807,8 @@ mod tests {
             &[lg, duet, built_in, sidecar],
         );
 
-        assert!(VirtualWorkspaceManager::intersection_area(lg, hidden) >= 1.0);
-        assert!(hidden.max().y <= lg.max().y || hidden.origin.y >= lg.max().y);
+        let lg_area = VirtualWorkspaceManager::intersection_area(lg, hidden);
+        assert!(lg_area <= 40_000.0, "hidden={hidden:?} lg_area={lg_area}");
         assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(built_in, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
@@ -1812,7 +1829,7 @@ mod tests {
             &[lg, duet, built_in, sidecar],
         );
 
-        assert!(VirtualWorkspaceManager::intersection_area(lg, hidden) >= 1.0);
+        assert!(VirtualWorkspaceManager::intersection_area(lg, hidden) <= 40_000.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(built_in, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
@@ -1833,7 +1850,7 @@ mod tests {
             &[lg, duet, built_in, sidecar],
         );
 
-        assert!(VirtualWorkspaceManager::intersection_area(lg, hidden) >= 1.0);
+        assert!(VirtualWorkspaceManager::intersection_area(lg, hidden) <= 40_000.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(built_in, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
@@ -1854,10 +1871,100 @@ mod tests {
             &[lg, duet, built_in, sidecar],
         );
 
-        assert!(VirtualWorkspaceManager::intersection_area(lg, hidden) >= 1.0);
+        assert!(VirtualWorkspaceManager::intersection_area(lg, hidden) <= 40_000.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(built_in, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
+    }
+
+    #[test]
+    fn hidden_position_for_lg_fixture_sized_window_does_not_park_on_duet() {
+        let manager = VirtualWorkspaceManager::new();
+        let lg = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3072.0, 1296.0));
+        let duet = CGRect::new(CGPoint::new(-676.0, 1296.0), CGSize::new(1366.0, 1024.0));
+        let built_in = CGRect::new(CGPoint::new(690.0, 1296.0), CGSize::new(1680.0, 1050.0));
+        let sidecar = CGRect::new(CGPoint::new(2370.0, 1296.0), CGSize::new(1366.0, 1024.0));
+        let hidden = manager.calculate_hidden_position_multi(
+            lg,
+            CGSize::new(1346.0, 1004.0),
+            HideCorner::BottomRight,
+            Some("local.rift.fixture-window.Rift-Fixture-Hidden-lg-ultrawide"),
+            &[lg, duet, built_in, sidecar],
+        );
+
+        assert!(VirtualWorkspaceManager::intersection_area(lg, hidden) <= 40_000.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(built_in, hidden), 0.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
+    }
+
+    #[test]
+    fn hidden_position_for_center_retina_keeps_anchor_tiny() {
+        let manager = VirtualWorkspaceManager::new();
+        let lg = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3072.0, 1296.0));
+        let duet = CGRect::new(CGPoint::new(-676.0, 1296.0), CGSize::new(1366.0, 1024.0));
+        let built_in = CGRect::new(CGPoint::new(690.0, 1296.0), CGSize::new(1680.0, 1050.0));
+        let sidecar = CGRect::new(CGPoint::new(2370.0, 1296.0), CGSize::new(1366.0, 1024.0));
+        let hidden = manager.calculate_hidden_position_multi(
+            built_in,
+            CGSize::new(825.0, 1030.0),
+            HideCorner::BottomRight,
+            None,
+            &[lg, duet, built_in, sidecar],
+        );
+
+        let built_in_area = VirtualWorkspaceManager::intersection_area(built_in, hidden);
+        assert!(built_in_area <= 50_000.0, "hidden={hidden:?} built_in_area={built_in_area}");
+        assert_eq!(VirtualWorkspaceManager::intersection_area(lg, hidden), 0.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
+    }
+
+    #[test]
+    fn hidden_position_for_center_retina_fixture_does_not_park_on_sidecar() {
+        let manager = VirtualWorkspaceManager::new();
+        let lg = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3072.0, 1296.0));
+        let duet = CGRect::new(CGPoint::new(-676.0, 1296.0), CGSize::new(1366.0, 1024.0));
+        let built_in = CGRect::new(CGPoint::new(690.0, 1296.0), CGSize::new(1680.0, 1050.0));
+        let sidecar = CGRect::new(CGPoint::new(2370.0, 1296.0), CGSize::new(1366.0, 1024.0));
+        let hidden = manager.calculate_hidden_position_multi(
+            built_in,
+            CGSize::new(825.0, 1024.0),
+            HideCorner::BottomRight,
+            Some("local.rift.fixture-window.Rift-Fixture-Hidden-built-in-retina-display"),
+            &[lg, duet, built_in, sidecar],
+        );
+
+        let built_in_area = VirtualWorkspaceManager::intersection_area(built_in, hidden);
+        assert!(built_in_area <= 50_000.0, "hidden={hidden:?} built_in_area={built_in_area}");
+        assert_eq!(VirtualWorkspaceManager::intersection_area(lg, hidden), 0.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
+        assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
+    }
+
+    #[test]
+    fn horizontal_boxed_detection_only_matches_center_retina() {
+        let lg = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3072.0, 1296.0));
+        let duet = CGRect::new(CGPoint::new(-676.0, 1296.0), CGSize::new(1366.0, 1024.0));
+        let built_in = CGRect::new(CGPoint::new(690.0, 1296.0), CGSize::new(1680.0, 1050.0));
+        let sidecar = CGRect::new(CGPoint::new(2370.0, 1296.0), CGSize::new(1366.0, 1024.0));
+
+        assert!(!VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
+            lg,
+            &[duet, built_in, sidecar]
+        ));
+        assert!(!VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
+            duet,
+            &[lg, built_in, sidecar]
+        ));
+        assert!(VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
+            built_in,
+            &[lg, duet, sidecar]
+        ));
+        assert!(!VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
+            sidecar,
+            &[lg, duet, built_in]
+        ));
     }
 
     #[test]

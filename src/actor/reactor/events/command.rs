@@ -29,6 +29,17 @@ impl CommandEventHandler {
             .find(|space| vwm.workspace_for_window(*space, window_id).is_some())
     }
 
+    fn assigned_space_for_window_idx(
+        reactor: &Reactor,
+        window_idx: u32,
+    ) -> Option<crate::sys::screen::SpaceId> {
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        reactor
+            .space_manager
+            .iter_known_spaces()
+            .find(|space| vwm.find_window_by_idx(*space, window_idx).is_some())
+    }
+
     pub fn handle_command(reactor: &mut Reactor, cmd: Command) {
         match cmd {
             Command::Layout(cmd) => Self::handle_command_layout(reactor, cmd),
@@ -89,7 +100,13 @@ impl CommandEventHandler {
                 }
             }
             LayoutCommand::MoveWindowToWorkspace { .. } => {
-                if let Some(space) = command_space {
+                let op_space = match &cmd {
+                    LayoutCommand::MoveWindowToWorkspace { window_id: Some(window_idx), .. } => {
+                        Self::assigned_space_for_window_idx(reactor, *window_idx).or(command_space)
+                    }
+                    _ => command_space,
+                };
+                if let Some(space) = op_space {
                     reactor
                         .layout_manager
                         .layout_engine
