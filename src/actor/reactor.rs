@@ -1136,13 +1136,19 @@ impl Reactor {
             trace!("Workspace switch stabilized with no further frame changes");
         }
 
-        // Execute deferred mouse warp after workspace switch completes
-        if let Some(wid) = self.workspace_switch_manager.pending_workspace_mouse_warp.take() {
+        // Execute deferred mouse warp only for command-driven workspace switches. Hover/focus
+        // churn can briefly look like a workspace switch and must never hijack physical mouse
+        // movement by recentering onto the focused window.
+        if self.workspace_switch_manager.manual_switch_in_progress()
+            && let Some(wid) = self.workspace_switch_manager.pending_workspace_mouse_warp.take()
+        {
             if let Some(window_center) = self.window_center_on_known_screen(wid)
                 && let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref()
             {
                 event_tap_tx.send(crate::actor::event_tap::Request::Warp(window_center));
             }
+        } else {
+            self.workspace_switch_manager.pending_workspace_mouse_warp = None;
         }
 
         if should_update_notifications {
