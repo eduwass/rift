@@ -64,6 +64,7 @@ pub enum LayoutCommand {
     ResizeWindowBy {
         amount: f64,
     },
+    Rebalance,
 
     /// Scroll the strip by a normalized delta (scaled by column step width)
     ScrollStrip {
@@ -1663,6 +1664,15 @@ impl LayoutEngine {
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 self.workspace_tree_mut(workspace_id).resize_selection_by(layout, amount);
+                EventResponse::default()
+            }
+            LayoutCommand::Rebalance => {
+                if is_floating {
+                    return EventResponse::default();
+                }
+
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                self.workspace_tree_mut(workspace_id).balance_sizes(layout);
                 EventResponse::default()
             }
             LayoutCommand::AdjustMasterRatio { delta } => {
