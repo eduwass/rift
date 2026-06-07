@@ -573,9 +573,9 @@ impl EventTap {
                 }
 
                 // ffm — forward deduped window-under-cursor changes to the
-                // reactor. All level-based filtering (popup suppression,
-                // menu-bar gap) happens in the reactor where SLS calls don't
-                // block the event tap.
+                // reactor. The event's embedded window id can be stale after
+                // cross-app focus changes, so prefer a WindowServer hit-test
+                // at the event location and use the event field as fallback.
                 if state.focus_follows_mouse_config_enabled
                     && state.focus_follows_mouse_enabled
                     && !state.disable_hotkey_active
@@ -815,6 +815,11 @@ impl State {
 
 #[inline]
 fn window_from_mouse_event(event: &CGEvent) -> Option<WindowServerId> {
+    let loc = CGEvent::location(Some(event));
+    if let Some(wsid) = window_server::get_window_at_point(loc) {
+        return Some(wsid);
+    }
+
     let field_value =
         CGEvent::integer_value_field(Some(event), CGEventField::MouseEventWindowUnderMousePointer);
     let id = u32::try_from(field_value).ok()?;
