@@ -1861,7 +1861,7 @@ impl Reactor {
             self.send_layout_event(event);
         }
         for (response, workspace_switch_space) in outcome.layout_responses {
-            self.handle_layout_response(response, workspace_switch_space);
+            self.handle_layout_response(response, workspace_switch_space, false);
         }
         for (window, frame) in outcome.drag_swap_evaluations {
             self.maybe_swap_on_drag(window, frame);
@@ -2204,7 +2204,7 @@ impl Reactor {
                         target_screen_size,
                         window_id,
                     );
-                    self.handle_layout_response(response, None);
+                    self.handle_layout_response(response, None, false);
                 }
             }
 
@@ -3165,7 +3165,14 @@ impl Reactor {
         let response =
             self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
         self.prepare_refocus_after_layout_event(&event_clone);
-        self.handle_layout_response(response, None);
+        let force_focus_warp = matches!(
+            event_clone,
+            LayoutEvent::WindowRemoved(_) | LayoutEvent::WindowRemovedPreserveFloating(_)
+        );
+        if force_focus_warp {
+            let _ = self.update_layout_or_warn(false, false);
+        }
+        self.handle_layout_response(response, None, force_focus_warp);
         for space in self.space_state.iter_known_spaces() {
             self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
         }
@@ -3566,7 +3573,7 @@ impl Reactor {
                     workspace_index,
                     app_window_id,
                 );
-                self.handle_layout_response(response, Some(window_space));
+                self.handle_layout_response(response, Some(window_space), false);
                 self.update_event_tap_layout_mode();
             }
         }
@@ -3576,6 +3583,7 @@ impl Reactor {
         &mut self,
         response: layout::EventResponse,
         workspace_switch_space: Option<SpaceId>,
+        force_focus_warp: bool,
     ) {
         if self.is_in_drag() {
             self.workspace_switch_manager.mark_workspace_switch_inactive();
@@ -3641,7 +3649,7 @@ impl Reactor {
                     }
 
                     // Recurse to handle the new response (e.g. focus window on the new workspace)
-                    self.handle_layout_response(resp, Some(space));
+                    self.handle_layout_response(resp, Some(space), false);
                     self.update_event_tap_layout_mode();
                     return;
                 }
@@ -3764,7 +3772,9 @@ impl Reactor {
                 .push(wid);
         }
         let focus_window_with_warp = focus_window.map(|wid| {
-            let warp = if self.config.settings.mouse_follows_focus {
+            let warp = if force_focus_warp {
+                self.window_center_on_known_screen(wid)
+            } else if self.config.settings.mouse_follows_focus {
                 if self.workspace_switch_manager.workspace_switch_state
                     == WorkspaceSwitchState::Active
                 {

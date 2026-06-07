@@ -966,7 +966,8 @@ impl LayoutEngine {
         window_store: &mut WindowStore,
         wid: WindowId,
         preserve_floating: bool,
-    ) {
+    ) -> EventResponse {
+        let was_focused = self.focused_window == Some(wid);
         let removal = self.remove_window_layout_membership(window_store, wid);
 
         if preserve_floating {
@@ -988,6 +989,22 @@ impl LayoutEngine {
         if let Some(space) = removal.active_space {
             self.broadcast_windows_changed(window_store, space);
         }
+
+        if was_focused
+            && let Some(space) = removal.active_space
+            && let Some(workspace_id) = self.virtual_workspace_manager.active_workspace(space)
+        {
+            let focus_window =
+                self.preferred_focus_for_workspace(window_store, space, workspace_id, None);
+            self.commit_workspace_focus(window_store, space, focus_window);
+            return EventResponse {
+                focus_window,
+                raise_windows: vec![],
+                boundary_hit: None,
+            };
+        }
+
+        EventResponse::default()
     }
 
     fn remove_window_layout_membership(
@@ -1459,10 +1476,10 @@ impl LayoutEngine {
                 }
             }
             LayoutEvent::WindowRemoved(wid) => {
-                self.remove_window_internal(window_store, wid, false);
+                return self.remove_window_internal(window_store, wid, false);
             }
             LayoutEvent::WindowRemovedPreserveFloating(wid) => {
-                self.remove_window_internal(window_store, wid, true);
+                return self.remove_window_internal(window_store, wid, true);
             }
             LayoutEvent::WindowFocused(space, wid) => {
                 if self.floating.is_floating(wid) {
