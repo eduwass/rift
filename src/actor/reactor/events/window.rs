@@ -66,6 +66,9 @@ impl WindowEventHandler {
                     reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
                 }
                 maybe_dispatch_window_added_in_space(reactor, wid, space);
+                reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+                reactor.workspace_switch_manager.pending_workspace_mouse_warp = Some(wid);
+                reactor.raise_window(wid, Quiet::No, None);
             }
         }
         // TODO: drag state is maybe managed by ensure_active_drag

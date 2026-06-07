@@ -943,7 +943,14 @@ impl Reactor {
 
         let should_update_notifications = Self::should_update_notifications(&event);
 
+        let main_window_changed = match &event {
+            Event::ApplicationMainWindowChanged(_, Some(wid), Quiet::No) => Some(*wid),
+            _ => None,
+        };
         let raised_window = self.main_window_tracker.handle_event(&event);
+        if let Some(wid) = main_window_changed {
+            self.workspace_switch_manager.pending_workspace_mouse_warp = Some(wid);
+        }
         let mut is_resize = false;
         let mut window_was_destroyed = false;
 

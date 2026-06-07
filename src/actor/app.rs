@@ -749,7 +749,7 @@ impl State {
                 // because of apps like firefox that send delayed(or dont send at all) axuielementdestroyed/windowserverdisappeared
                 // this is a fallback to ensure we handle windows being closed
                 self.remove_stale_windows();
-                self.on_main_window_changed(None, false);
+                self.on_main_window_changed(None, true);
             }
             kAXWindowCreatedNotification => {
                 if self.id(&elem).is_ok() {
