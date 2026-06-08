@@ -364,6 +364,8 @@ pub struct Settings {
     pub mouse_follows_focus: bool,
     #[serde(default = "yes")]
     pub mouse_hides_on_focus: bool,
+    #[serde(default = "no")]
+    pub restore_cursor_position_per_workspace: bool,
     #[serde(default = "yes")]
     pub focus_follows_mouse: bool,
     /// Hotkey that disables focus-follows-mouse while held.

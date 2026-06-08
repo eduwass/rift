@@ -574,6 +574,8 @@ impl EventTap {
                     });
                 }
 
+                _ = self.events_tx.send(Event::MouseMoved);
+
                 // ffm — forward deduped window-under-cursor changes to the
                 // reactor. The event's embedded window id can be stale after
                 // cross-app focus changes, so prefer a WindowServer hit-test

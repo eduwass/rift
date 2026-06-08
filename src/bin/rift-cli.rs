@@ -673,12 +673,12 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         LayoutCommands::JoinWindow { direction } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::JoinWindow(direction.into())),
         )),
-        LayoutCommands::SplitHorizontal => Ok(RiftCommand::Reactor(
-            reactor::Command::Layout(LC::SplitSelection(layout::LayoutKind::Horizontal)),
-        )),
-        LayoutCommands::SplitVertical => Ok(RiftCommand::Reactor(
-            reactor::Command::Layout(LC::SplitSelection(layout::LayoutKind::Vertical)),
-        )),
+        LayoutCommands::SplitHorizontal => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::SplitSelection(layout::LayoutKind::Horizontal),
+        ))),
+        LayoutCommands::SplitVertical => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::SplitSelection(layout::LayoutKind::Vertical),
+        ))),
         LayoutCommands::ToggleStack => {
             Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::ToggleStack)))
         }
@@ -717,9 +717,9 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         LayoutCommands::CenterSelection => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::CenterSelection,
         ))),
-        LayoutCommands::Rebalance => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::Rebalance,
-        ))),
+        LayoutCommands::Rebalance => {
+            Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::Rebalance)))
+        }
     }
 }
 

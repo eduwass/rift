@@ -20,6 +20,7 @@ use crate::actor::{
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
+use crate::model::virtual_workspace::VirtualWorkspaceId;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -155,7 +156,9 @@ pub struct WorkspaceSwitchManager {
     pub workspace_switch_generation: u64,
     pub active_workspace_switch: Option<u64>,
     pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
+    pub pending_workspace_cursor_warp: Option<CGPoint>,
     pub pending_workspace_mouse_warp: Option<WindowId>,
+    pub saved_workspace_cursors: HashMap<(SpaceId, VirtualWorkspaceId), CGPoint>,
 }
 
 impl WorkspaceSwitchManager {

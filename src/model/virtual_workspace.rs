@@ -1916,7 +1916,10 @@ mod tests {
 
         let built_in_area = VirtualWorkspaceManager::intersection_area(built_in, hidden);
         assert_eq!(hidden.size, CGSize::new(1.0, 1.0));
-        assert!(built_in_area <= 1.0, "hidden={hidden:?} built_in_area={built_in_area}");
+        assert!(
+            built_in_area <= 1.0,
+            "hidden={hidden:?} built_in_area={built_in_area}"
+        );
         assert_eq!(VirtualWorkspaceManager::intersection_area(lg, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
@@ -1939,7 +1942,10 @@ mod tests {
 
         let built_in_area = VirtualWorkspaceManager::intersection_area(built_in, hidden);
         assert_eq!(hidden.size, CGSize::new(1.0, 1.0));
-        assert!(built_in_area <= 1.0, "hidden={hidden:?} built_in_area={built_in_area}");
+        assert!(
+            built_in_area <= 1.0,
+            "hidden={hidden:?} built_in_area={built_in_area}"
+        );
         assert_eq!(VirtualWorkspaceManager::intersection_area(lg, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(duet, hidden), 0.0);
         assert_eq!(VirtualWorkspaceManager::intersection_area(sidecar, hidden), 0.0);
@@ -1952,22 +1958,30 @@ mod tests {
         let built_in = CGRect::new(CGPoint::new(690.0, 1296.0), CGSize::new(1680.0, 1050.0));
         let sidecar = CGRect::new(CGPoint::new(2370.0, 1296.0), CGSize::new(1366.0, 1024.0));
 
-        assert!(!VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
-            lg,
-            &[duet, built_in, sidecar]
-        ));
-        assert!(!VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
-            duet,
-            &[lg, built_in, sidecar]
-        ));
-        assert!(VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
-            built_in,
-            &[lg, duet, sidecar]
-        ));
-        assert!(!VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
-            sidecar,
-            &[lg, duet, built_in]
-        ));
+        assert!(
+            !VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
+                lg,
+                &[duet, built_in, sidecar]
+            )
+        );
+        assert!(
+            !VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
+                duet,
+                &[lg, built_in, sidecar]
+            )
+        );
+        assert!(
+            VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
+                built_in,
+                &[lg, duet, sidecar]
+            )
+        );
+        assert!(
+            !VirtualWorkspaceManager::is_horizontally_boxed_by_same_row_screens(
+                sidecar,
+                &[lg, duet, built_in]
+            )
+        );
     }
 
     #[test]

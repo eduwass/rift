@@ -203,6 +203,10 @@ pub enum Event {
     /// The mouse cursor moved over a new window. Only sent if focus-follows-
     /// mouse is enabled.
     MouseMovedOverWindow(WindowServerId),
+    /// The mouse cursor moved within the active desktop. Used to remember the
+    /// latest point per workspace even when focus-follows-mouse does not emit a
+    /// window-change event.
+    MouseMoved,
     /// System woke from sleep; used to re-subscribe SLS notifications.
     SystemWoke,
 
@@ -351,7 +355,9 @@ impl Reactor {
                 workspace_switch_generation: 0,
                 active_workspace_switch: None,
                 pending_workspace_switch_origin: None,
+                pending_workspace_cursor_warp: None,
                 pending_workspace_mouse_warp: None,
+                saved_workspace_cursors: HashMap::default(),
             },
             recording_manager: managers::RecordingManager { record },
             communication_manager: managers::CommunicationManager {
@@ -822,6 +828,7 @@ impl Reactor {
 
     fn log_event(&self, event: &Event) {
         match event {
+            Event::MouseMoved => trace!(?event, "Event"),
             Event::WindowFrameChanged(..) | Event::MouseUp => trace!(?event, "Event"),
             _ => debug!(?event, "Event"),
         }
@@ -1071,6 +1078,14 @@ impl Reactor {
             Event::MouseMovedOverWindow(wsid) => {
                 WindowEventHandler::handle_mouse_moved_over_window(self, wsid);
             }
+            Event::MouseMoved => {
+                if self.workspace_switch_manager.workspace_switch_state
+                    == WorkspaceSwitchState::Inactive
+                {
+                    self.save_cursor_for_cursor_workspace();
+                }
+                return;
+            }
             Event::SystemWoke => SystemEventHandler::handle_system_woke(self),
             Event::MissionControlNativeEntered => {
                 SpaceEventHandler::handle_mission_control_native_entered(self);
@@ -1130,6 +1145,7 @@ impl Reactor {
             self.maybe_send_menu_update();
         }
 
+        let was_manual_workspace_switch = self.workspace_switch_manager.manual_switch_in_progress();
         self.workspace_switch_manager.mark_workspace_switch_inactive();
         if self.workspace_switch_manager.active_workspace_switch.is_some() && !layout_changed {
             self.workspace_switch_manager.active_workspace_switch = None;
@@ -1138,16 +1154,31 @@ impl Reactor {
 
         // Execute deferred mouse warp only for command-driven workspace switches. Hover/focus
         // churn can briefly look like a workspace switch and must never hijack physical mouse
-        // movement by recentering onto the focused window.
-        if self.workspace_switch_manager.manual_switch_in_progress()
+        // movement by recentering onto the focused window. Prefer the exact cursor position
+        // saved for the destination workspace so switching back resumes where typing happened.
+        if was_manual_workspace_switch
+            && let Some(target) = self.workspace_switch_manager.pending_workspace_cursor_warp.take()
+        {
+            if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
+                event_tap_tx.send(crate::actor::event_tap::Request::Warp(target));
+            }
+        } else if was_manual_workspace_switch
             && let Some(wid) = self.workspace_switch_manager.pending_workspace_mouse_warp.take()
         {
-            if let Some(window_center) = self.window_center_on_known_screen(wid)
+            let restored_cursor = self
+                .config
+                .settings
+                .restore_cursor_position_per_workspace
+                .then(|| self.restored_cursor_for_workspace_window(wid))
+                .flatten();
+            if let Some(target) =
+                restored_cursor.or_else(|| self.window_center_on_known_screen(wid))
                 && let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref()
             {
-                event_tap_tx.send(crate::actor::event_tap::Request::Warp(window_center));
+                event_tap_tx.send(crate::actor::event_tap::Request::Warp(target));
             }
         } else {
+            self.workspace_switch_manager.pending_workspace_cursor_warp = None;
             self.workspace_switch_manager.pending_workspace_mouse_warp = None;
         }
 
@@ -1161,6 +1192,9 @@ impl Reactor {
 
                 self.notification_manager.last_sls_notification_ids = ids;
             }
+        }
+        if self.workspace_switch_manager.workspace_switch_state == WorkspaceSwitchState::Inactive {
+            self.save_cursor_for_cursor_workspace();
         }
         self.update_event_tap_layout_mode();
     }
@@ -1725,6 +1759,51 @@ impl Reactor {
     fn window_center_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {
         let window_center = self.window_manager.windows.get(&wid)?.frame_monotonic.mid();
         self.screen_for_point(window_center).map(|_| window_center)
+    }
+
+    pub(crate) fn save_cursor_for_workspace(&mut self, space: SpaceId) {
+        let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space) else {
+            return;
+        };
+        let Ok(point) = current_cursor_location() else {
+            return;
+        };
+        self.workspace_switch_manager
+            .saved_workspace_cursors
+            .insert((space, workspace_id), point);
+    }
+
+    fn save_cursor_for_cursor_workspace(&mut self) {
+        let Some(space) = self.space_for_cursor_screen() else {
+            return;
+        };
+        if self.is_space_active(space) {
+            self.save_cursor_for_workspace(space);
+        }
+    }
+
+    fn restored_cursor_for_workspace_window(&self, wid: WindowId) -> Option<CGPoint> {
+        let space = self.best_space_for_window_id(wid)?;
+        let workspace_id = self.layout_manager.layout_engine.active_workspace(space)?;
+        let point = *self
+            .workspace_switch_manager
+            .saved_workspace_cursors
+            .get(&(space, workspace_id))?;
+        let frame = self.window_manager.windows.get(&wid)?.frame_monotonic;
+        if frame.contains(point) && self.screen_for_point(point).is_some() {
+            Some(point)
+        } else {
+            None
+        }
+    }
+
+    fn restored_cursor_for_space(&self, space: SpaceId) -> Option<CGPoint> {
+        let workspace_id = self.layout_manager.layout_engine.active_workspace(space)?;
+        let point = *self
+            .workspace_switch_manager
+            .saved_workspace_cursors
+            .get(&(space, workspace_id))?;
+        self.screen_for_point(point).map(|_| point)
     }
 
     fn has_visible_window_server_ids_for_pid(&self, pid: pid_t) -> bool {
@@ -2297,6 +2376,14 @@ impl Reactor {
 
         let original_focus = focus_window;
 
+        if self.config.settings.restore_cursor_position_per_workspace
+            && self.workspace_switch_manager.manual_switch_in_progress()
+            && let Some(space) = workspace_switch_space
+        {
+            self.workspace_switch_manager.pending_workspace_cursor_warp =
+                self.restored_cursor_for_space(space);
+        }
+
         let focus_quiet = workspace_switch_space.map_or(Quiet::No, |_| Quiet::Yes);
 
         let handled_without_raise = if raise_windows.is_empty() && focus_window.is_none() {
@@ -2305,7 +2392,13 @@ impl Reactor {
                 WorkspaceSwitchState::Active
             ) && !self.is_in_drag()
             {
-                if let Some(wid) = self.window_id_under_cursor() {
+                if let Some(wid) = workspace_switch_space
+                    .filter(|_| self.workspace_switch_manager.manual_switch_in_progress())
+                    .and_then(|space| self.last_focused_window_in_space(space))
+                {
+                    focus_window = Some(wid);
+                    false
+                } else if let Some(wid) = self.window_id_under_cursor() {
                     // Avoid duplicate focus events for the already focused window.
                     if self.main_window() != Some(wid) {
                         focus_window = Some(wid);

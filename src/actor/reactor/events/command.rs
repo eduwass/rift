@@ -21,8 +21,12 @@ fn poke_border_for_window(window_server_id: Option<WindowServerId>) {
     let state_dir = home.join(".local/state/rift");
     let _ = std::fs::create_dir_all(&state_dir);
     let _ = std::fs::write(state_dir.join("borders.target"), format!("{}\n", wsid.as_u32()));
-    let Ok(pid_text) = std::fs::read_to_string(state_dir.join("borders.pid")) else { return };
-    let Ok(pid) = pid_text.trim().parse::<nix::libc::pid_t>() else { return };
+    let Ok(pid_text) = std::fs::read_to_string(state_dir.join("borders.pid")) else {
+        return;
+    };
+    let Ok(pid) = pid_text.trim().parse::<nix::libc::pid_t>() else {
+        return;
+    };
     unsafe { nix::libc::kill(pid, nix::libc::SIGUSR1) };
 }
 
@@ -81,6 +85,9 @@ impl CommandEventHandler {
         let workspace_space = if requires_workspace_space {
             if let Some(space) = command_space {
                 reactor.store_current_floating_positions(space);
+                if is_workspace_switch {
+                    reactor.save_cursor_for_workspace(space);
+                }
             }
             command_space
         } else {
@@ -112,7 +119,9 @@ impl CommandEventHandler {
             }
             LayoutCommand::MoveWindowToWorkspace { .. } => {
                 let op_space = match &cmd {
-                    LayoutCommand::MoveWindowToWorkspace { window_id: Some(window_idx), .. } => {
+                    LayoutCommand::MoveWindowToWorkspace {
+                        window_id: Some(window_idx), ..
+                    } => {
                         Self::assigned_space_for_window_idx(reactor, *window_idx).or(command_space)
                     }
                     _ => command_space,

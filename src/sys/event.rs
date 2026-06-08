@@ -11,9 +11,15 @@ pub use super::window_server::current_cursor_location;
 use crate::sys::cg_ok;
 pub use crate::sys::hotkey::{Hotkey, HotkeySpec, KeyCode, Modifiers};
 use crate::sys::skylight::{
-    CFRelease, CGEventSourceCreate, CGEventSourceSetLocalEventsSuppressionInterval,
-    CGWarpMouseCursorPosition,
+    CFRelease, CGAssociateMouseAndMouseCursorPosition, CGEventCreateMouseEvent, CGEventPost,
+    CGEventSetIntegerValueField, CGEventSourceCreate,
+    CGEventSourceSetLocalEventsSuppressionInterval, CGEventTapLocation, CGWarpMouseCursorPosition,
 };
+
+const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
+const K_CG_MOUSE_BUTTON_LEFT: u32 = 0;
+const K_CG_MOUSE_EVENT_DELTA_X: u32 = 4;
+const K_CG_MOUSE_EVENT_DELTA_Y: u32 = 5;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
@@ -60,6 +66,18 @@ pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
     unsafe { CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0) };
 
     let res = cg_ok(unsafe { CGWarpMouseCursorPosition(point) });
+    let _ = cg_ok(unsafe { CGAssociateMouseAndMouseCursorPosition(true) });
+    let event = unsafe {
+        CGEventCreateMouseEvent(src, K_CG_EVENT_MOUSE_MOVED, point, K_CG_MOUSE_BUTTON_LEFT)
+    };
+    if !event.is_null() {
+        unsafe {
+            CGEventSetIntegerValueField(event, K_CG_MOUSE_EVENT_DELTA_X, 4);
+            CGEventSetIntegerValueField(event, K_CG_MOUSE_EVENT_DELTA_Y, 4);
+            CGEventPost(CGEventTapLocation::HID, event);
+            CFRelease(event);
+        }
+    }
     unsafe { CFRelease(src) };
     res
 }

@@ -222,10 +222,17 @@ unsafe extern "C" {
     pub fn _AXUIElementCreateWithRemoteToken(data: *mut CFData) -> *mut AXUIElement;
 
     pub fn CGEventCreate(source: *mut CFType) -> *mut CFType;
+    pub fn CGEventCreateMouseEvent(
+        source: *mut CFType,
+        mouse_type: u32,
+        mouse_cursor_position: CGPoint,
+        mouse_button: u32,
+    ) -> *mut CFType;
     pub fn CGEventSourceCreate(state: CGEventSourceStateID) -> *mut CFType;
     pub fn CGEventSetIntegerValueField(event: *mut CFType, field: u32, value: i64);
     pub fn CGEventSetDoubleValueField(event: *mut CFType, field: u32, value: f64);
     pub fn CGEventPost(tapLocation: CGEventTapLocation, event: *mut CFType);
+    pub fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> CGError;
     pub fn CGWarpMouseCursorPosition(point: CGPoint) -> CGError;
     pub fn CGEventSourceSetLocalEventsSuppressionInterval(source: *mut CFType, interval: f64);
 
