@@ -56,6 +56,9 @@ const MOUSE_MOVE_MIN_DISTANCE_PX_SQ_LOW_POWER: f64 = 9.0; // 3px^2
 #[derive(Debug)]
 pub enum Request {
     Warp(CGPoint),
+    /// Move the cursor without a synthetic mouse-moved event, so focus-follows-mouse does not
+    /// re-decide focus (used after move-window-to-display, where focus is already set).
+    WarpSilent(CGPoint),
     EnforceHidden,
     ScreenParametersChanged(Vec<(CGRect, Option<SpaceId>)>, CoordinateConverter),
     SpaceChanged(Vec<Option<SpaceId>>),
@@ -328,6 +331,20 @@ impl EventTap {
         match request {
             Request::Warp(point) => {
                 if let Err(e) = event::warp_mouse(point) {
+                    warn!("Failed to warp mouse: {e:?}");
+                } else {
+                    state.above_window = None;
+                }
+                if state.mouse_hides_on_focus && !state.hidden {
+                    debug!("Hiding mouse");
+                    if let Err(e) = event::hide_mouse() {
+                        warn!("Failed to hide mouse: {e:?}");
+                    }
+                    state.hidden = true;
+                }
+            }
+            Request::WarpSilent(point) => {
+                if let Err(e) = event::warp_mouse_silent(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 } else {
                     state.above_window = None;

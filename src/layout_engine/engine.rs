@@ -9,7 +9,9 @@ use super::{Direction, FloatingManager, LayoutId, LayoutKind, LayoutSystemKind, 
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, LayoutSettings, VirtualWorkspaceSettings};
+use crate::common::config::{
+    LayoutMode, LayoutSettings, ScrollingFocusBoundaryBehavior, VirtualWorkspaceSettings,
+};
 use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::model::virtual_workspace::{
@@ -687,6 +689,10 @@ impl LayoutEngine {
         }
 
         let previous_selection = self.workspace_tree(ws_id).selected_window(layout);
+        let scrolling_stops_at_boundary =
+            matches!(self.workspace_tree(ws_id), LayoutSystemKind::Scrolling(_))
+                && self.layout_settings.scrolling.focus_boundary_behavior
+                    == ScrollingFocusBoundaryBehavior::Stop;
 
         let (focus_window_raw, raise_windows) =
             self.workspace_tree_mut(ws_id).move_focus(layout, direction);
@@ -704,12 +710,14 @@ impl LayoutEngine {
             if let Some(prev_wid) = previous_selection {
                 let _ = self.workspace_tree_mut(ws_id).select_window(layout, prev_wid);
             }
-            if let Some(new_space) = self.next_space_for_direction(
-                space,
-                direction,
-                visible_spaces,
-                visible_space_centers,
-            ) {
+            if !scrolling_stops_at_boundary
+                && let Some(new_space) = self.next_space_for_direction(
+                    space,
+                    direction,
+                    visible_spaces,
+                    visible_space_centers,
+                )
+            {
                 let Some((new_ws_id, new_layout)) = self.workspace_and_layout(new_space) else {
                     debug!(
                         "No active workspace/layout for adjacent space {:?}; skipping cross-space focus",

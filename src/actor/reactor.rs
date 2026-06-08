@@ -267,6 +267,11 @@ pub struct Reactor {
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     display_topology_manager: DisplayTopologyManager,
+    // After move-window-to-display, the cursor warp must wait until the window has physically
+    // re-tiled at its destination; warping immediately lands on a neighbour (because the move is
+    // async) and focus-follows-mouse then steals focus. Holds (window, the centered frame we
+    // seeded, deadline) until the window settles or the deadline passes.
+    pending_display_move_warp: Option<(WindowId, CGRect, std::time::Instant)>,
 }
 
 impl Reactor {
@@ -393,6 +398,7 @@ impl Reactor {
             },
             active_spaces: HashSet::default(),
             display_topology_manager: DisplayTopologyManager::default(),
+            pending_display_move_warp: None,
         }
     }
 
@@ -1180,6 +1186,34 @@ impl Reactor {
         } else {
             self.workspace_switch_manager.pending_workspace_cursor_warp = None;
             self.workspace_switch_manager.pending_workspace_mouse_warp = None;
+        }
+
+        // Deferred cursor warp for a completed move-window-to-display. Fire once the moved window
+        // has actually re-tiled away from the centered frame we seeded (so the cursor lands on the
+        // window, not a neighbour that would steal focus-follows-mouse), or once a short deadline
+        // passes as a safety net.
+        if let Some((wid, seeded_frame, deadline)) = self.pending_display_move_warp {
+            let settled = match self.window_manager.windows.get(&wid) {
+                Some(window) => {
+                    let f = window.frame_monotonic;
+                    (f.origin.x - seeded_frame.origin.x).abs() > 2.0
+                        || (f.origin.y - seeded_frame.origin.y).abs() > 2.0
+                        || (f.size.width - seeded_frame.size.width).abs() > 2.0
+                        || (f.size.height - seeded_frame.size.height).abs() > 2.0
+                }
+                None => true,
+            };
+            if settled || std::time::Instant::now() >= deadline {
+                // Warp silently: focus is already on the moved window (we raised it), and a synthetic
+                // mouse-moved event here would let focus-follows-mouse re-pick a neighbour that is
+                // still overlapping mid-relayout, stealing focus back.
+                if let Some(target) = self.window_center_on_known_screen(wid)
+                    && let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref()
+                {
+                    event_tap_tx.send(crate::actor::event_tap::Request::WarpSilent(target));
+                }
+                self.pending_display_move_warp = None;
+            }
         }
 
         if should_update_notifications {

@@ -542,11 +542,33 @@ impl CommandEventHandler {
         reactor.send_layout_event(LayoutEvent::WindowFocused(target_space, window_id));
 
         let _ = reactor.update_layout_or_warn(false, false);
-        if let Some(window_center) = reactor.window_center_on_known_screen(window_id)
-            && let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref()
-        {
-            event_tap_tx.send(crate::actor::event_tap::Request::Warp(window_center));
+
+        // Model focus alone leaves the moved window without AX key focus when the source
+        // display still has a window to compete with it (a programmatic cursor warp does not
+        // reliably re-trigger focus-follows-mouse). Raise the moved window to key the same way
+        // explicit focus does, so it stays focused and typeable on the target display.
+        let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
+        if let Some(app) = reactor.app_manager.apps.get(&window_id.pid) {
+            app_handles.insert(window_id.pid, app.handle.clone());
         }
+        let raise_request = raise_manager::Event::RaiseRequest(raise_manager::RaiseRequest {
+            raise_windows: Vec::new(),
+            focus_window: Some((window_id, None)),
+            app_handles,
+            focus_quiet: Quiet::No,
+        });
+        if let Err(e) = reactor.communication_manager.raise_manager_tx.try_send(raise_request) {
+            warn!("Failed to send raise request after display move: {}", e);
+        }
+
+        // Defer the cursor warp until the window has physically re-tiled at its destination. The
+        // window move is async (SetWindowFrame + a follow-up layout pass), so warping now would
+        // land on a neighbour on the target display and focus-follows-mouse would steal focus from
+        // the window we just moved. `finalize_event_processing` performs the warp once the window
+        // settles. `target_frame` is the centered frame we seeded above, used to detect settling.
+        reactor.pending_display_move_warp =
+            Some((window_id, target_frame, std::time::Instant::now() + std::time::Duration::from_millis(600)));
+
         poke_border_for_window(window_server_id);
     }
 

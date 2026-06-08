@@ -259,28 +259,21 @@ fn bound_scrolling_frame_to_display(
         .filter(|other| **other != screen)
         .any(|other| rects_intersect(bounded, *other));
     if bleeds_to_other_display {
-        collapse_to_owner_display_edge(bounded, screen)
+        clip_to_owner_display(bounded, screen)
     } else {
         bounded
     }
 }
 
-fn collapse_to_owner_display_edge(frame: CGRect, screen: CGRect) -> CGRect {
-    const EDGE_SLIVER_WIDTH: f64 = 80.0;
-    let width = EDGE_SLIVER_WIDTH.min(screen.size.width.max(1.0));
-    let height = frame.size.height.min(screen.size.height).max(1.0);
-    let place_left = frame.origin.x < screen.origin.x;
-    let x = if place_left {
-        screen.origin.x
-    } else {
-        screen.max().x - width
-    };
-    let y = frame
-        .origin
-        .y
-        .clamp(screen.origin.y, (screen.max().y - height).max(screen.origin.y));
+fn clip_to_owner_display(frame: CGRect, screen: CGRect) -> CGRect {
+    let x1 = frame.origin.x.max(screen.origin.x);
+    let y1 = frame.origin.y.max(screen.origin.y);
+    let x2 = frame.max().x.min(screen.max().x);
+    let y2 = frame.max().y.min(screen.max().y);
+    let width = (x2 - x1).max(1.0);
+    let height = (y2 - y1).max(1.0);
 
-    CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+    CGRect::new(CGPoint::new(x1, y1), CGSize::new(width, height))
 }
 
 fn rects_intersect(a: CGRect, b: CGRect) -> bool {
@@ -498,7 +491,7 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::{
-        bound_frame_to_screen, bound_scrolling_frame_to_display, collapse_to_owner_display_edge,
+        bound_frame_to_screen, bound_scrolling_frame_to_display, clip_to_owner_display,
         rects_intersect,
     };
 
@@ -543,15 +536,16 @@ mod tests {
     }
 
     #[test]
-    fn collapse_to_owner_display_edge_stays_on_owner_display() {
-        let lg = rect(0.0, 0.0, 3072.0, 1296.0);
-        let duet = rect(-676.0, 1296.0, 1366.0, 1024.0);
-        let collapsed = collapse_to_owner_display_edge(rect(3062.0, 34.0, 2197.0, 1252.0), duet);
+    fn clip_to_owner_display_keeps_continuous_visible_column() {
+        let built_in = rect(690.0, 1296.0, 1680.0, 1050.0);
+        let sidecar = rect(2370.0, 1296.0, 1366.0, 1024.0);
+        let clipped = clip_to_owner_display(rect(1905.0, 1306.0, 1512.0, 1030.0), built_in);
 
-        assert!(rects_intersect(collapsed, duet), "collapsed={collapsed:?}");
-        assert!(!rects_intersect(collapsed, lg), "collapsed={collapsed:?}");
-        assert!(collapsed.size.width <= 80.0);
-        assert!(collapsed.size.height <= duet.size.height);
+        assert!(rects_intersect(clipped, built_in), "clipped={clipped:?}");
+        assert!(!rects_intersect(clipped, sidecar), "clipped={clipped:?}");
+        assert_eq!(clipped.origin.x, 1905.0);
+        assert_eq!(clipped.size.width, 465.0);
+        assert_eq!(clipped.size.height, 1030.0);
     }
 
     #[test]

@@ -678,6 +678,9 @@ pub struct ScrollingLayoutSettings {
     /// - anchored: always align focused column to `alignment`.
     #[serde(default)]
     pub focus_navigation_style: ScrollingFocusNavigationStyle,
+    /// What keyboard focus navigation does at the first/last scrolling column.
+    #[serde(default)]
+    pub focus_boundary_behavior: ScrollingFocusBoundaryBehavior,
     /// Trackpad gestures for scrolling layout
     #[serde(default)]
     pub gestures: ScrollingGestureSettings,
@@ -692,6 +695,7 @@ impl Default for ScrollingLayoutSettings {
             max_column_width_ratio: default_scrolling_max_column_width_ratio(),
             alignment: ScrollingAlignment::default(),
             focus_navigation_style: ScrollingFocusNavigationStyle::default(),
+            focus_boundary_behavior: ScrollingFocusBoundaryBehavior::default(),
             gestures: ScrollingGestureSettings::default(),
         }
     }
@@ -722,6 +726,14 @@ pub enum ScrollingFocusNavigationStyle {
     #[default]
     Niri,
     Anchored,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollingFocusBoundaryBehavior {
+    #[default]
+    Stop,
+    CrossSpace,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
