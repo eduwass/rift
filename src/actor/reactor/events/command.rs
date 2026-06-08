@@ -351,6 +351,7 @@ pub struct MoveWindowToDisplayPayload {
 pub fn handle_command_reactor_move_window_to_display(
     state: &mut RiftState,
     layout: &mut LayoutManager,
+    apps: &AppManager,
     payload: MoveWindowToDisplayPayload,
 ) -> anyhow::Result<EventOutcome> {
     if let Some(window) = state.windows.window_mut(payload.window) {
@@ -382,9 +383,27 @@ pub fn handle_command_reactor_move_window_to_display(
 
     poke_border_for_window(payload.window_server_id);
 
+    // Raise so the moved window stays key/focused on the target display; defer the
+    // cursor warp (via EventOutcome::pending_display_move_warp applied by Reactor)
+    // until the window has physically re-tiled — an immediate warp would let FFM
+    // steal focus to an overlapping neighbour mid-relayout.
+    let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
+    if let Some(app) = apps.apps.get(&payload.window.pid) {
+        app_handles.insert(payload.window.pid, app.handle.clone());
+    }
     Ok(EventOutcome::finalized_event(None, false, false, false)
         .with_layout_response(response, None)
         .with_pre_layout_window_frame_write(payload.window, payload.target_frame, true)
         .with_layout_event(LayoutEvent::WindowFocused(payload.target_space, payload.window))
-        .with_mouse_warp(payload.target_frame.mid()))
+        .with_raise_request(raise_manager::Event::RaiseRequest(raise_manager::RaiseRequest {
+            raise_windows: Vec::new(),
+            focus_window: Some((payload.window, None)),
+            app_handles,
+            focus_quiet: Quiet::No,
+        }))
+        .with_pending_display_move_warp(
+            payload.window,
+            payload.target_frame,
+            std::time::Duration::from_millis(600),
+        ))
 }

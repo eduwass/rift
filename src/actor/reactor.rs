@@ -313,6 +313,8 @@ pub struct Reactor {
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     pub animation_tx: Option<AnimationSender>,
+    // After move-window-to-display, defer cursor warp until the window re-tiles.
+    pending_display_move_warp: Option<(WindowId, CGRect, std::time::Instant)>,
 }
 
 impl Reactor {
@@ -435,6 +437,7 @@ impl Reactor {
             },
             active_spaces: HashSet::default(),
             animation_tx: None,
+            pending_display_move_warp: None,
         };
         reactor
     }
@@ -1727,6 +1730,7 @@ impl Reactor {
                 return command_workflow::handle_command_reactor_move_window_to_display(
                     &mut self.state,
                     &mut self.layout_manager,
+                    &self.app_manager,
                     command_workflow::MoveWindowToDisplayPayload {
                         window,
                         window_server_id,
@@ -1932,6 +1936,9 @@ impl Reactor {
                 warn!(?error, "failed to make key window");
             }
         }
+        if let Some(pending) = outcome.pending_display_move_warp.take() {
+            self.pending_display_move_warp = Some(pending);
+        }
         for point in outcome.mouse_warps {
             self.warp_mouse(point);
         }
@@ -2018,6 +2025,28 @@ impl Reactor {
         } else {
             self.workspace_switch_manager.pending_workspace_cursor_warp = None;
             self.workspace_switch_manager.pending_workspace_mouse_warp = None;
+        }
+
+        // Deferred cursor warp for a completed move-window-to-display.
+        if let Some((wid, seeded_frame, deadline)) = self.pending_display_move_warp {
+            let settled = match self.state.windows.window(wid) {
+                Some(window) => {
+                    let f = window.frame_monotonic;
+                    (f.origin.x - seeded_frame.origin.x).abs() > 2.0
+                        || (f.origin.y - seeded_frame.origin.y).abs() > 2.0
+                        || (f.size.width - seeded_frame.size.width).abs() > 2.0
+                        || (f.size.height - seeded_frame.size.height).abs() > 2.0
+                }
+                None => true,
+            };
+            if settled || std::time::Instant::now() >= deadline {
+                if let Some(target) = self.window_center_on_known_screen(wid)
+                    && let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref()
+                {
+                    event_tap_tx.send(crate::actor::event_tap::Request::WarpSilent(target));
+                }
+                self.pending_display_move_warp = None;
+            }
         }
 
         if outcome.refresh_window_notifications {

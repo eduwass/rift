@@ -54,6 +54,9 @@ const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 16_000_000; // 16ms ~= 62 Hz
 #[derive(Debug)]
 pub enum Request {
     Warp(CGPoint),
+    /// Move the cursor without a synthetic mouse-moved event, so focus-follows-mouse does not
+    /// re-decide focus (used after move-window-to-display, where focus is already set).
+    WarpSilent(CGPoint),
     EnforceHidden,
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     SetEventProcessing(bool),
@@ -340,6 +343,20 @@ impl EventTap {
                 if state.mouse_hides_on_focus && state.hide_count == 0 {
                     debug!("Hiding mouse");
                     state.hide_mouse();
+                }
+            }
+            Request::WarpSilent(point) => {
+                if let Err(e) = event::warp_mouse_silent(point) {
+                    warn!("Failed to warp mouse: {e:?}");
+                } else {
+                    state.above_window = None;
+                }
+                if state.mouse_hides_on_focus && !state.hidden {
+                    debug!("Hiding mouse");
+                    if let Err(e) = event::hide_mouse() {
+                        warn!("Failed to hide mouse: {e:?}");
+                    }
+                    state.hidden = true;
                 }
             }
             Request::EnforceHidden => {

@@ -82,6 +82,15 @@ pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
     res
 }
 
+/// Move the cursor without synthesizing a mouse-moved event. Use this when focus has already been
+/// decided (e.g. right after move-window-to-display) and a synthetic move would let focus-follows-
+/// mouse re-pick a window — possibly one still overlapping mid-relayout — and steal focus back.
+pub fn warp_mouse_silent(point: CGPoint) -> Result<(), CGError> {
+    let res = cg_ok(unsafe { CGWarpMouseCursorPosition(point) });
+    let _ = cg_ok(unsafe { CGAssociateMouseAndMouseCursorPosition(true) });
+    res
+}
+
 pub fn hide_mouse() -> Result<(), CGError> { cg_ok(CGDisplayHideCursor(kCGNullDirectDisplay)) }
 
 pub fn show_mouse() -> Result<(), CGError> { cg_ok(CGDisplayShowCursor(kCGNullDirectDisplay)) }

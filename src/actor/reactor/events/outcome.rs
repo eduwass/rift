@@ -62,6 +62,7 @@ pub(crate) struct EventOutcome {
     pub(crate) raise_requests: Vec<raise_manager::Event>,
     pub(crate) make_key_windows: Vec<(pid_t, WindowServerId)>,
     pub(crate) mouse_warps: Vec<CGPoint>,
+    pub(crate) pending_display_move_warp: Option<(WindowId, CGRect, std::time::Instant)>,
     pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
     pub(crate) drag_swap_evaluations: Vec<(WindowId, CGRect)>,
     pub(crate) dispatch_mouse_up: bool,
@@ -109,6 +110,9 @@ impl EventOutcome {
         self.raise_requests.append(&mut other.raise_requests);
         self.make_key_windows.append(&mut other.make_key_windows);
         self.mouse_warps.append(&mut other.mouse_warps);
+        if other.pending_display_move_warp.is_some() {
+            self.pending_display_move_warp = other.pending_display_move_warp.take();
+        }
         self.pre_layout_window_frame_writes
             .append(&mut other.pre_layout_window_frame_writes);
         self.drag_swap_evaluations.append(&mut other.drag_swap_evaluations);
@@ -158,6 +162,7 @@ impl EventOutcome {
             raise_requests: Vec::new(),
             make_key_windows: Vec::new(),
             mouse_warps: Vec::new(),
+            pending_display_move_warp: None,
             pre_layout_window_frame_writes: Vec::new(),
             drag_swap_evaluations: Vec::new(),
             dispatch_mouse_up: false,
@@ -310,6 +315,17 @@ impl EventOutcome {
 
     pub(crate) fn with_mouse_warp(mut self, point: CGPoint) -> Self {
         self.mouse_warps.push(point);
+        self
+    }
+
+    pub(crate) fn with_pending_display_move_warp(
+        mut self,
+        window: WindowId,
+        seeded_frame: CGRect,
+        timeout: std::time::Duration,
+    ) -> Self {
+        self.pending_display_move_warp =
+            Some((window, seeded_frame, std::time::Instant::now() + timeout));
         self
     }
 
