@@ -453,6 +453,7 @@ impl WindowEventHandler {
                 active_space_for_window(reactor, &window.frame_monotonic, window.info.sys_id)
             {
                 reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+                reactor.broadcast_window_focused(wid, space);
             }
         }
     }

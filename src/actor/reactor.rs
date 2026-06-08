@@ -1136,6 +1136,7 @@ impl Reactor {
         if let Some(raised_window) = raised_window {
             if let Some(space) = self.best_space_for_window_id(raised_window) {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
+                self.broadcast_window_focused(raised_window, space);
             }
         }
 
@@ -1462,6 +1463,7 @@ impl Reactor {
         if let Some(main_window) = self.main_window() {
             if let Some(space) = self.main_window_space() {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
+                self.broadcast_window_focused(main_window, space);
             }
         }
         let ws_info = self.filter_ws_info_to_active_spaces(ws_info);
@@ -1519,6 +1521,27 @@ impl Reactor {
             };
             let _ = self.communication_manager.event_broadcaster.send(event);
         }
+    }
+
+    // Broadcast the focused window's current frame so an event-driven overlay renderer can place a
+    // border/halo without polling. Called wherever focus changes (hover, raise, init). The renderer
+    // dedups redundant frames, so no server-side dedup is needed here.
+    pub(crate) fn broadcast_window_focused(&self, window_id: WindowId, space: SpaceId) {
+        let Some(window) = self.window_manager.windows.get(&window_id) else {
+            return;
+        };
+        let frame = window.frame_monotonic;
+        let display_uuid = self.display_uuid_for_space(space);
+        let event = BroadcastEvent::WindowFocused {
+            window_id,
+            frame_x: frame.origin.x,
+            frame_y: frame.origin.y,
+            frame_width: frame.size.width,
+            frame_height: frame.size.height,
+            space_id: space,
+            display_uuid,
+        };
+        let _ = self.communication_manager.event_broadcaster.send(event);
     }
 
     fn maybe_reapply_app_rules_for_window(&mut self, window_id: WindowId) {

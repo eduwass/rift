@@ -49,6 +49,19 @@ pub enum BroadcastEvent {
         space_id: SpaceId,
         display_uuid: Option<String>,
     },
+    // Fired whenever the focused window changes (keyboard focus, focus-follows-mouse, or a
+    // programmatic raise), carrying the window's current frame so an event-driven overlay
+    // renderer can place a border/halo without polling CGWindowList. Frame is sent as four plain
+    // f64s (CG top-left coords) to keep the JSON dependency-free for the Swift subscriber.
+    WindowFocused {
+        window_id: WindowId,
+        frame_x: f64,
+        frame_y: f64,
+        frame_width: f64,
+        frame_height: f64,
+        space_id: SpaceId,
+        display_uuid: Option<String>,
+    },
 }
 
 pub type BroadcastSender = crate::actor::Sender<BroadcastEvent>;

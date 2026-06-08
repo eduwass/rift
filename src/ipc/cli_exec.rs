@@ -119,6 +119,26 @@ impl CliExecutor for DefaultCliExecutor {
                     env_vars.insert("RIFT_DISPLAY_UUID".into(), display_uuid.clone());
                 }
             }
+            BroadcastEvent::WindowFocused {
+                window_id,
+                frame_x,
+                frame_y,
+                frame_width,
+                frame_height,
+                space_id,
+                display_uuid,
+            } => {
+                env_vars.insert("RIFT_EVENT_TYPE".into(), "window_focused".into());
+                env_vars.insert("RIFT_WINDOW_ID".into(), window_id.to_debug_string());
+                env_vars.insert("RIFT_FRAME_X".into(), frame_x.to_string());
+                env_vars.insert("RIFT_FRAME_Y".into(), frame_y.to_string());
+                env_vars.insert("RIFT_FRAME_WIDTH".into(), frame_width.to_string());
+                env_vars.insert("RIFT_FRAME_HEIGHT".into(), frame_height.to_string());
+                env_vars.insert("RIFT_SPACE_ID".into(), space_id.to_string());
+                if let Some(display_uuid) = display_uuid.as_ref() {
+                    env_vars.insert("RIFT_DISPLAY_UUID".into(), display_uuid.clone());
+                }
+            }
         }
 
         let event_json = match serde_json::to_string(event) {
