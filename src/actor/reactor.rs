@@ -1532,12 +1532,14 @@ impl Reactor {
         };
         let frame = window.frame_monotonic;
         let display_uuid = self.display_uuid_for_space(space);
+        let is_floating = self.layout_manager.layout_engine.is_window_floating(window_id);
         let event = BroadcastEvent::WindowFocused {
             window_id,
             frame_x: frame.origin.x,
             frame_y: frame.origin.y,
             frame_width: frame.size.width,
             frame_height: frame.size.height,
+            is_floating,
             space_id: space,
             display_uuid,
         };

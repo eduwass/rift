@@ -125,6 +125,7 @@ impl CliExecutor for DefaultCliExecutor {
                 frame_y,
                 frame_width,
                 frame_height,
+                is_floating,
                 space_id,
                 display_uuid,
             } => {
@@ -134,6 +135,7 @@ impl CliExecutor for DefaultCliExecutor {
                 env_vars.insert("RIFT_FRAME_Y".into(), frame_y.to_string());
                 env_vars.insert("RIFT_FRAME_WIDTH".into(), frame_width.to_string());
                 env_vars.insert("RIFT_FRAME_HEIGHT".into(), frame_height.to_string());
+                env_vars.insert("RIFT_IS_FLOATING".into(), is_floating.to_string());
                 env_vars.insert("RIFT_SPACE_ID".into(), space_id.to_string());
                 if let Some(display_uuid) = display_uuid.as_ref() {
                     env_vars.insert("RIFT_DISPLAY_UUID".into(), display_uuid.clone());

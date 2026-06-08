@@ -59,6 +59,9 @@ pub enum BroadcastEvent {
         frame_y: f64,
         frame_width: f64,
         frame_height: f64,
+        // Floating windows are excluded from tiling, so an overlay renderer can skip them (the old
+        // borders blacklisted floating apps). Lets the renderer match that without a round-trip.
+        is_floating: bool,
         space_id: SpaceId,
         display_uuid: Option<String>,
     },
