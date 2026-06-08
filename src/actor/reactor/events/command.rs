@@ -34,8 +34,12 @@ fn poke_border_for_window(window_server_id: Option<WindowServerId>) {
     let state_dir = home.join(".local/state/rift");
     let _ = std::fs::create_dir_all(&state_dir);
     let _ = std::fs::write(state_dir.join("borders.target"), format!("{}\n", wsid.as_u32()));
-    let Ok(pid_text) = std::fs::read_to_string(state_dir.join("borders.pid")) else { return };
-    let Ok(pid) = pid_text.trim().parse::<nix::libc::pid_t>() else { return };
+    let Ok(pid_text) = std::fs::read_to_string(state_dir.join("borders.pid")) else {
+        return;
+    };
+    let Ok(pid) = pid_text.trim().parse::<nix::libc::pid_t>() else {
+        return;
+    };
     unsafe { nix::libc::kill(pid, nix::libc::SIGUSR1) };
 }
 

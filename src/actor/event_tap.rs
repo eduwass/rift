@@ -612,6 +612,11 @@ impl EventTap {
         }
         let loc = CGEvent::location(Some(event));
 
+        // Track cursor movement within the active desktop so the reactor can
+        // remember the latest point per workspace, independent of
+        // focus-follows-mouse.
+        _ = self.events_tx.send(Event::CursorMoved);
+
         // Recover modifier state at the sampled rate instead of once per raw
         // mouse event. Normal modifier transitions arrive through
         // FlagsChanged; this is only the defensive reconciliation path for
