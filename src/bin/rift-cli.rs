@@ -203,6 +203,10 @@ enum LayoutCommands {
     MoveNode { direction: String },
     /// Join the selected window with neighbor in a direction
     JoinWindow { direction: String },
+    /// Preselect/split the selected container horizontally for the next insertion
+    SplitHorizontal,
+    /// Preselect/split the selected container vertically for the next insertion
+    SplitVertical,
     /// Toggle stacked state for the selected container
     ToggleStack,
     /// Global orientation toggle that works consistently across layout modes (and between splits/stacks)
@@ -668,6 +672,12 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         )),
         LayoutCommands::JoinWindow { direction } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::JoinWindow(direction.into())),
+        )),
+        LayoutCommands::SplitHorizontal => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::SplitSelection(layout::LayoutKind::Horizontal)),
+        )),
+        LayoutCommands::SplitVertical => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::SplitSelection(layout::LayoutKind::Vertical)),
         )),
         LayoutCommands::ToggleStack => {
             Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::ToggleStack)))

@@ -1893,15 +1893,11 @@ impl Reactor {
                 continue;
             };
 
-            if !self.layout_manager.layout_engine.is_window_floating(above_wid) {
-                continue;
-            }
-
             let Some(above_state) = self.window_manager.windows.get(&above_wid) else {
                 continue;
             };
             let above_frame = above_state.frame_monotonic;
-            if !candidate_frame.contains_rect(above_frame) {
+            if candidate_frame.intersection(&above_frame).area() <= 64.0 {
                 continue;
             }
 

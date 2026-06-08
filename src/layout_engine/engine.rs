@@ -5,7 +5,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
+use super::{Direction, FloatingManager, LayoutId, LayoutKind, LayoutSystemKind, WorkspaceLayouts};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
@@ -51,6 +51,7 @@ pub enum LayoutCommand {
     MoveNode(Direction),
 
     JoinWindow(Direction),
+    SplitSelection(LayoutKind),
     ToggleStack,
     ToggleOrientation,
     UnjoinWindows,
@@ -1611,6 +1612,17 @@ impl LayoutEngine {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 self.workspace_tree_mut(workspace_id)
                     .join_selection_with_direction(layout, direction);
+                EventResponse::default()
+            }
+            LayoutCommand::SplitSelection(kind) => {
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                match self.workspace_tree_mut(workspace_id) {
+                    LayoutSystemKind::Traditional(s) => s.split_selection(layout, kind),
+                    LayoutSystemKind::Bsp(s) => s.split_selection(layout, kind),
+                    LayoutSystemKind::Stack(s) => s.split_selection(layout, kind),
+                    LayoutSystemKind::MasterStack(s) => s.split_selection(layout, kind),
+                    LayoutSystemKind::Scrolling(s) => s.split_selection(layout, kind),
+                }
                 EventResponse::default()
             }
             LayoutCommand::ToggleStack => {
