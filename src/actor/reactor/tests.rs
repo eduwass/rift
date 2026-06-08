@@ -2813,6 +2813,7 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
             boundary_hit: None,
         },
         None,
+        false,
     );
     let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
     match msg {
@@ -2857,6 +2858,7 @@ fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
             boundary_hit: None,
         },
         None,
+        false,
     );
     let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
     match msg {
