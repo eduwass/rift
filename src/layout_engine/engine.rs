@@ -1730,19 +1730,25 @@ impl LayoutEngine {
                 if let LayoutSystemKind::Scrolling(system) = self.workspace_tree_mut(workspace_id) {
                     resp.boundary_hit = system.scroll_by_delta(layout, delta);
                 }
+                resp.raise_windows =
+                    self.workspace_tree(workspace_id).visible_windows_in_layout(layout);
                 resp
             }
             LayoutCommand::SnapStrip => {
                 if let LayoutSystemKind::Scrolling(system) = self.workspace_tree_mut(workspace_id) {
                     system.snap_to_nearest_column(layout);
                 }
-                EventResponse::default()
+                Self::response_for_raised_windows(
+                    self.workspace_tree(workspace_id).visible_windows_in_layout(layout),
+                )
             }
             LayoutCommand::CenterSelection => {
                 if let LayoutSystemKind::Scrolling(system) = self.workspace_tree_mut(workspace_id) {
                     system.center_selected_column(layout);
                 }
-                EventResponse::default()
+                Self::response_for_raised_windows(
+                    self.workspace_tree(workspace_id).visible_windows_in_layout(layout),
+                )
             }
         }
     }

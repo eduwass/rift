@@ -94,7 +94,7 @@ new_window_placement = "master"
 # these settings only apply when layout mode == "scrolling"
 [settings.layout.scrolling]
 # width of the active column (0..1 of screen width)
-column_width_ratio = 0.7
+column_width_ratio = 0.9
 # min_column_width_ratio / max_column_width_ratio: clamp bounds used by resize commands
 min_column_width_ratio = 0.3
 max_column_width_ratio = 0.9

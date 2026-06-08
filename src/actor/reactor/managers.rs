@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::trace;
 
 use super::replay::Record;
@@ -235,6 +235,7 @@ fn bound_scrolling_tiled_frames_to_screen(
     reactor: &Reactor,
     layout: &mut Vec<(WindowId, CGRect)>,
     screen: CGRect,
+    all_screens: &[CGRect],
     active_workspace_windows: &HashSet<WindowId>,
 ) {
     for (wid, frame) in layout.iter_mut() {
@@ -243,8 +244,50 @@ fn bound_scrolling_tiled_frames_to_screen(
         {
             continue;
         }
-        *frame = bound_frame_to_screen(*frame, screen);
+        *frame = bound_scrolling_frame_to_display(*frame, screen, all_screens);
     }
+}
+
+fn bound_scrolling_frame_to_display(
+    frame: CGRect,
+    screen: CGRect,
+    all_screens: &[CGRect],
+) -> CGRect {
+    let bounded = bound_frame_to_screen(frame, screen);
+    let bleeds_to_other_display = all_screens
+        .iter()
+        .filter(|other| **other != screen)
+        .any(|other| rects_intersect(bounded, *other));
+    if bleeds_to_other_display {
+        collapse_to_owner_display_edge(bounded, screen)
+    } else {
+        bounded
+    }
+}
+
+fn collapse_to_owner_display_edge(frame: CGRect, screen: CGRect) -> CGRect {
+    const EDGE_SLIVER_WIDTH: f64 = 80.0;
+    let width = EDGE_SLIVER_WIDTH.min(screen.size.width.max(1.0));
+    let height = frame.size.height.min(screen.size.height).max(1.0);
+    let place_left = frame.origin.x < screen.origin.x;
+    let x = if place_left {
+        screen.origin.x
+    } else {
+        screen.max().x - width
+    };
+    let y = frame
+        .origin
+        .y
+        .clamp(screen.origin.y, (screen.max().y - height).max(screen.origin.y));
+
+    CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+}
+
+fn rects_intersect(a: CGRect, b: CGRect) -> bool {
+    a.origin.x < b.max().x
+        && a.max().x > b.origin.x
+        && a.origin.y < b.max().y
+        && a.max().y > b.origin.y
 }
 
 impl LayoutManager {
@@ -263,11 +306,6 @@ impl LayoutManager {
         }
         let screens = reactor.space_manager.screens.clone();
         let all_screen_frames: Vec<CGRect> = screens.iter().map(|s| s.frame).collect();
-        let active_space_count = screens
-            .iter()
-            .filter_map(|screen| screen.space)
-            .filter(|space| reactor.is_space_active(*space))
-            .count();
         let mut layout_result = LayoutResult::new();
 
         for screen in screens {
@@ -299,9 +337,8 @@ impl LayoutManager {
                     |wid| reactor.window_manager.windows.get(&wid).map(|w| w.frame_monotonic),
                     &all_screen_frames,
                 );
-            if active_space_count > 1
-                && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
-                    == LayoutMode::Scrolling
+            if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+                == LayoutMode::Scrolling
             {
                 let active_workspace_windows: HashSet<WindowId> = reactor
                     .layout_manager
@@ -313,6 +350,7 @@ impl LayoutManager {
                     reactor,
                     &mut layout,
                     screen.frame,
+                    &all_screen_frames,
                     &active_workspace_windows,
                 );
             }
@@ -459,7 +497,10 @@ pub struct PendingSpaceChangeManager {
 mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
-    use super::bound_frame_to_screen;
+    use super::{
+        bound_frame_to_screen, bound_scrolling_frame_to_display, collapse_to_owner_display_edge,
+        rects_intersect,
+    };
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
         CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
@@ -499,5 +540,87 @@ mod tests {
         let bounded = bound_frame_to_screen(frame, screen);
         assert_eq!(bounded.origin.x, 2998.0);
         assert_eq!(bounded.size.width, 600.0);
+    }
+
+    #[test]
+    fn collapse_to_owner_display_edge_stays_on_owner_display() {
+        let lg = rect(0.0, 0.0, 3072.0, 1296.0);
+        let duet = rect(-676.0, 1296.0, 1366.0, 1024.0);
+        let collapsed = collapse_to_owner_display_edge(rect(3062.0, 34.0, 2197.0, 1252.0), duet);
+
+        assert!(rects_intersect(collapsed, duet), "collapsed={collapsed:?}");
+        assert!(!rects_intersect(collapsed, lg), "collapsed={collapsed:?}");
+        assert!(collapsed.size.width <= 80.0);
+        assert!(collapsed.size.height <= duet.size.height);
+    }
+
+    #[test]
+    fn scrolling_bounds_do_not_bleed_across_live_four_display_topology() {
+        let lg = rect(0.0, 0.0, 3072.0, 1296.0);
+        let duet = rect(-676.0, 1296.0, 1366.0, 1024.0);
+        let built_in = rect(690.0, 1296.0, 1680.0, 1050.0);
+        let sidecar = rect(2370.0, 1296.0, 1366.0, 1024.0);
+        let screens = [lg, duet, built_in, sidecar];
+        let cases = [
+            (duet, rect(700.0, 1306.0, 1660.0, 1030.0)),
+            (built_in, rect(2380.0, 1306.0, 1346.0, 1004.0)),
+            (sidecar, rect(-666.0, 1306.0, 969.0, 1004.0)),
+            (duet, rect(-2187.0, 34.0, 2197.0, 1252.0)),
+            (sidecar, rect(-1343.0, 34.0, 2197.0, 1252.0)),
+        ];
+
+        for (owner, frame) in cases {
+            let bounded = bound_scrolling_frame_to_display(frame, owner, &screens);
+            for screen in screens {
+                if screen == owner {
+                    continue;
+                }
+                assert!(
+                    !rects_intersect(bounded, screen),
+                    "owner={owner:?} frame={frame:?} bounded={bounded:?} bleeds into {screen:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generated_scrolling_columns_can_be_bounded_for_each_live_display() {
+        let lg = rect(0.0, 0.0, 3072.0, 1296.0);
+        let duet = rect(-676.0, 1296.0, 1366.0, 1024.0);
+        let built_in = rect(690.0, 1296.0, 1680.0, 1050.0);
+        let sidecar = rect(2370.0, 1296.0, 1366.0, 1024.0);
+        let screens = [lg, duet, built_in, sidecar];
+
+        for owner in screens {
+            let column_width = owner.size.width * 0.9;
+            let raw_frames = [
+                rect(
+                    owner.origin.x - column_width - 8.0,
+                    owner.origin.y,
+                    column_width,
+                    owner.size.height,
+                ),
+                rect(owner.origin.x, owner.origin.y, column_width, owner.size.height),
+                rect(
+                    owner.origin.x + column_width + 8.0,
+                    owner.origin.y,
+                    column_width,
+                    owner.size.height,
+                ),
+            ];
+
+            for frame in raw_frames {
+                let bounded = bound_scrolling_frame_to_display(frame, owner, &screens);
+                for screen in screens {
+                    if screen == owner {
+                        continue;
+                    }
+                    assert!(
+                        !rects_intersect(bounded, screen),
+                        "owner={owner:?} frame={frame:?} bounded={bounded:?} bleeds into {screen:?}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -573,7 +573,7 @@ fn default_master_stack_count() -> usize {
 }
 
 fn default_scrolling_column_width_ratio() -> f64 {
-    0.7
+    0.9
 }
 
 fn default_scrolling_min_column_width_ratio() -> f64 {
@@ -1513,6 +1513,13 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrolling_defaults_to_nearly_full_width_columns() {
+        let settings = ScrollingLayoutSettings::default();
+
+        assert_eq!(settings.column_width_ratio, 0.9);
+    }
 
     #[test]
     fn test_normalize_hotkey_string() {
