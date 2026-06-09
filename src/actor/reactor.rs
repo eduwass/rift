@@ -1552,7 +1552,7 @@ impl Reactor {
         // unchanged from the last broadcast — collapses the redundant multi-site re-emits while still
         // emitting on a real focus change or a frame change (resize/re-tile).
         let frame_key = [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height];
-        if self.last_focus_broadcast.get() == Some((window_id, frame_key)) {
+        if !focus_dedup_should_emit(self.last_focus_broadcast.get(), (window_id, frame_key)) {
             return;
         }
         self.last_focus_broadcast.set(Some((window_id, frame_key)));
@@ -3214,5 +3214,50 @@ impl Reactor {
             warn!(error = ?e, "{}", context);
             false
         })
+    }
+}
+
+// Source-side dedup for WindowFocused: ~5 reactor sites can fire for one focus change, so skip an
+// emit when the focused window AND its frame are unchanged from the last broadcast. Keyed on both
+// (window_id, frame) so a real focus change OR a frame change (resize/re-tile) still emits, while a
+// redundant same-window same-frame re-fire is suppressed. Pure + generic so it's unit-tested below.
+fn focus_dedup_should_emit<Id: PartialEq + Copy>(
+    last: Option<(Id, [f64; 4])>,
+    cur: (Id, [f64; 4]),
+) -> bool {
+    last != Some(cur)
+}
+
+#[cfg(test)]
+mod focus_dedup_tests {
+    use super::focus_dedup_should_emit;
+
+    const F: [f64; 4] = [0.0, 0.0, 100.0, 100.0];
+
+    #[test]
+    fn first_emit_passes() {
+        assert!(focus_dedup_should_emit::<u32>(None, (1, F)));
+    }
+
+    #[test]
+    fn identical_window_and_frame_is_suppressed() {
+        assert!(!focus_dedup_should_emit(Some((1u32, F)), (1u32, F)));
+    }
+
+    #[test]
+    fn different_window_emits() {
+        assert!(focus_dedup_should_emit(Some((1u32, F)), (2u32, F)));
+    }
+
+    #[test]
+    fn same_window_resized_emits() {
+        let resized = [0.0, 0.0, 200.0, 100.0];
+        assert!(focus_dedup_should_emit(Some((1u32, F)), (1u32, resized)));
+    }
+
+    #[test]
+    fn same_window_moved_emits() {
+        let moved = [50.0, 0.0, 100.0, 100.0];
+        assert!(focus_dedup_should_emit(Some((1u32, F)), (1u32, moved)));
     }
 }
