@@ -1152,6 +1152,16 @@ impl Reactor {
             self.maybe_send_menu_update();
         }
 
+        // Keep the focus-border overlay synced when the focused window's frame changed without a
+        // focus change — i.e. a resize (opt+cmd+/-) or a re-tile/move. The renderer dedups, so
+        // re-broadcasting the focused frame here is a no-op unless it actually moved.
+        if (is_resize || layout_changed)
+            && let Some(wid) = self.main_window()
+            && let Some(space) = self.main_window_space()
+        {
+            self.broadcast_window_focused(wid, space);
+        }
+
         let was_manual_workspace_switch = self.workspace_switch_manager.manual_switch_in_progress();
         self.workspace_switch_manager.mark_workspace_switch_inactive();
         if self.workspace_switch_manager.active_workspace_switch.is_some() && !layout_changed {
