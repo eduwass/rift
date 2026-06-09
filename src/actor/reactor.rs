@@ -272,6 +272,12 @@ pub struct Reactor {
     // async) and focus-follows-mouse then steals focus. Holds (window, the centered frame we
     // seeded, deadline) until the window settles or the deadline passes.
     pending_display_move_warp: Option<(WindowId, CGRect, std::time::Instant)>,
+    // Last (window, frame) we broadcast as WindowFocused. ~5 reactor sites (hover, raise, init,
+    // finalize, observed) can fire for one focus change, flooding subscribers with identical events
+    // (measured: ~8% of events under fast nav are sub-10ms duplicates). Dedup here so we only emit on
+    // a genuine change. Cell: broadcast_window_focused takes &self. Frame as [x,y,w,h] so a real move
+    // (resize) still emits, while a same-window same-frame re-fire is suppressed.
+    last_focus_broadcast: std::cell::Cell<Option<(WindowId, [f64; 4])>>,
 }
 
 impl Reactor {
@@ -399,6 +405,7 @@ impl Reactor {
             active_spaces: HashSet::default(),
             display_topology_manager: DisplayTopologyManager::default(),
             pending_display_move_warp: None,
+            last_focus_broadcast: std::cell::Cell::new(None),
         }
     }
 
@@ -1541,6 +1548,14 @@ impl Reactor {
             return;
         };
         let frame = window.frame_monotonic;
+        // Dedup: ~5 sites can fire for one focus change. Skip if the focused window AND its frame are
+        // unchanged from the last broadcast — collapses the redundant multi-site re-emits while still
+        // emitting on a real focus change or a frame change (resize/re-tile).
+        let frame_key = [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height];
+        if self.last_focus_broadcast.get() == Some((window_id, frame_key)) {
+            return;
+        }
+        self.last_focus_broadcast.set(Some((window_id, frame_key)));
         let display_uuid = self.display_uuid_for_space(space);
         let is_floating = self.layout_manager.layout_engine.is_window_floating(window_id);
         // Same monotonic clock the Swift renderer reads (CLOCK_UPTIME_RAW), so it can compute
