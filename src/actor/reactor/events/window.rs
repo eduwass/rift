@@ -319,6 +319,15 @@ impl WindowEventHandler {
                 window.frame_monotonic = new_frame;
             }
 
+            // Mouse drag (resize/move) reaches here as an observed frame change — not via rift's
+            // apply path that finalize_event_processing covers. If it's the focused window,
+            // re-broadcast so the event-driven focus border follows the drag live.
+            if reactor.main_window() == Some(wid)
+                && let Some(space) = new_space
+            {
+                reactor.broadcast_window_focused(wid, space);
+            }
+
             let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
 
             if !dragging {
