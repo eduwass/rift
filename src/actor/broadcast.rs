@@ -64,6 +64,9 @@ pub enum BroadcastEvent {
         is_floating: bool,
         space_id: SpaceId,
         display_uuid: Option<String>,
+        // Monotonic stamp (CLOCK_UPTIME_RAW ns) taken at emit, so an overlay renderer can measure
+        // end-to-end focus->draw latency against its own clock_gettime_nsec_np(CLOCK_UPTIME_RAW).
+        broadcast_ns: u64,
     },
 }
 

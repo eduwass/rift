@@ -128,6 +128,7 @@ impl CliExecutor for DefaultCliExecutor {
                 is_floating,
                 space_id,
                 display_uuid,
+                broadcast_ns: _,
             } => {
                 env_vars.insert("RIFT_EVENT_TYPE".into(), "window_focused".into());
                 env_vars.insert("RIFT_WINDOW_ID".into(), window_id.to_debug_string());

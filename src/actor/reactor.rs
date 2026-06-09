@@ -1543,6 +1543,13 @@ impl Reactor {
         let frame = window.frame_monotonic;
         let display_uuid = self.display_uuid_for_space(space);
         let is_floating = self.layout_manager.layout_engine.is_window_floating(window_id);
+        // Same monotonic clock the Swift renderer reads (CLOCK_UPTIME_RAW), so it can compute
+        // focus->draw latency. clock_gettime_nsec_np isn't re-exported by nix::libc; clock_gettime is.
+        let broadcast_ns = unsafe {
+            let mut ts: nix::libc::timespec = std::mem::zeroed();
+            nix::libc::clock_gettime(nix::libc::CLOCK_UPTIME_RAW, &mut ts);
+            ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+        };
         let event = BroadcastEvent::WindowFocused {
             window_id,
             frame_x: frame.origin.x,
@@ -1552,6 +1559,7 @@ impl Reactor {
             is_floating,
             space_id: space,
             display_uuid,
+            broadcast_ns,
         };
         let _ = self.communication_manager.event_broadcaster.send(event);
     }
