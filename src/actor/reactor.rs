@@ -3341,13 +3341,60 @@ impl Reactor {
             return true;
         };
 
-        let order = {
-            let space_id = space.get();
-            crate::sys::window_server::space_window_list_for_connection(&[space_id], 0, false)
-        };
+        // FFM occlusion cache: the z-order list and per-window level queries below are synchronous
+        // WindowServer round-trips on the reactor's serial thread, and this gate runs on EVERY window
+        // crossing. The ffm-perf probe measured them at 10–148 ms per call during a fast multi-display
+        // sweep — the reactor fell behind the cursor and window_focused emits trailed by 100–500 ms (the
+        // "border lags the mouse" jank). Z-order/levels don't change at mouse-sweep timescales, so a
+        // short-TTL cache makes repeat crossings free while a real occlusion change is picked up within
+        // ~100 ms (one TTL). Reactor is single-threaded → thread_local is safe and lock-free.
+        use std::cell::RefCell;
+        use std::time::Instant;
+        type NSWindowLevelT = objc2_app_kit::NSWindowLevel;
+        const OCCLUSION_TTL: Duration = Duration::from_millis(100);
+        thread_local! {
+            static ZORDER_CACHE: RefCell<HashMap<u64, (Instant, Vec<u32>)>> =
+                RefCell::new(HashMap::default());
+            static LEVEL_CACHE: RefCell<HashMap<u32, (Instant, Option<NSWindowLevelT>, i32)>> =
+                RefCell::new(HashMap::default());
+        }
+        fn cached_zorder(space_id: u64) -> Vec<u32> {
+            ZORDER_CACHE.with(|c| {
+                let mut cache = c.borrow_mut();
+                let now = Instant::now();
+                match cache.get(&space_id) {
+                    Some((at, order)) if at.elapsed() < OCCLUSION_TTL => order.clone(),
+                    _ => {
+                        let order = crate::sys::window_server::space_window_list_for_connection(
+                            &[space_id],
+                            0,
+                            false,
+                        );
+                        cache.insert(space_id, (now, order.clone()));
+                        order
+                    }
+                }
+            })
+        }
+        fn cached_levels(wid: u32) -> (Option<NSWindowLevelT>, i32) {
+            LEVEL_CACHE.with(|c| {
+                let mut cache = c.borrow_mut();
+                let now = Instant::now();
+                match cache.get(&wid) {
+                    Some((at, level, sub)) if at.elapsed() < OCCLUSION_TTL => (*level, *sub),
+                    _ => {
+                        let level = window_level(wid);
+                        let sub = window_sub_level(wid);
+                        cache.insert(wid, (now, level, sub));
+                        (level, sub)
+                    }
+                }
+            })
+        }
+
+        let order = cached_zorder(space.get());
         let candidate_u32 = candidate_wsid.as_u32();
-        let candidate_level = window_level(candidate_u32);
-        let candidate_sub_level = window_sub_level(candidate_u32);
+        let (candidate_level, candidate_sub_level) = cached_levels(candidate_u32);
 
         for above_u32 in order {
             if above_u32 == candidate_u32 {
@@ -3367,8 +3414,7 @@ impl Reactor {
                 continue;
             }
 
-            let above_level = window_level(above_u32);
-            let above_sub_level = window_sub_level(above_u32);
+            let (above_level, above_sub_level) = cached_levels(above_u32);
             if candidate_level
                 .zip(above_level)
                 .is_some_and(|(candidate, above)| candidate == above)
