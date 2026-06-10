@@ -132,6 +132,25 @@ pub struct Timer {
     inner: Arc<Mutex<TimerState>>,
 }
 
+/// A non-owning handle to a [`Timer`]: can re-arm its next fire date but never cancels it.
+/// See [`Timer::handle`].
+#[derive(Clone)]
+pub struct TimerHandle {
+    inner: Arc<Mutex<TimerState>>,
+}
+
+impl TimerHandle {
+    /// Sets the next time the underlying timer will fire. No-op if the timer was cancelled.
+    pub fn set_next_fire(&self, delay: Duration) {
+        let mut state = self.inner.lock();
+        let Some(cf_timer) = state.cf_timer.as_mut() else {
+            return;
+        };
+        let fire_time = CFAbsoluteTimeGetCurrent() + delay.as_secs_f64();
+        cf_timer.set_next_fire_date(fire_time);
+    }
+}
+
 struct TimerState {
     cf_timer: Option<CFRetained<CFRunLoopTimer>>,
     waker: Option<Waker>,
@@ -282,6 +301,14 @@ impl Timer {
         };
         let fire_time = CFAbsoluteTimeGetCurrent() + delay.as_secs_f64();
         cf_timer.set_next_fire_date(fire_time);
+    }
+
+    /// Returns a cloneable handle that can retarget this timer's next fire date from another
+    /// owner (e.g. a CFRunLoop callback on the same thread, while the Timer itself is being
+    /// polled inside a select loop). Dropping the handle does NOT cancel the timer — only
+    /// dropping the Timer does — so handing one out is always safe.
+    pub fn handle(&self) -> TimerHandle {
+        TimerHandle { inner: self.inner.clone() }
     }
 
     /// Cancels the timer, preventing it from firing.

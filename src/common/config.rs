@@ -368,6 +368,13 @@ pub struct Settings {
     pub restore_cursor_position_per_workspace: bool,
     #[serde(default = "yes")]
     pub focus_follows_mouse: bool,
+    /// Dwell (ms) the cursor must stay over a window before focus-follows-mouse raises it.
+    /// Sweeping the mouse across windows raises NOTHING until the cursor settles — this is what
+    /// keeps WindowServer calm during fast multi-display mouse movement (each raise is an app
+    /// activation + menu bar switch + window reorder; ~10/s of those saturate the compositor and
+    /// every overlay/window update on the system starts applying late). 0 = raise immediately.
+    #[serde(default = "default_ffm_dwell_ms")]
+    pub focus_follows_mouse_dwell_ms: u64,
     /// Hotkey that disables focus-follows-mouse while held.
     /// Accepts either a full hotkey (e.g. "Ctrl + A") or a modifier-only spec (e.g. "Ctrl")
     #[serde(default)]
@@ -1141,6 +1148,9 @@ impl InnerGaps {
 
 fn yes() -> bool {
     true
+}
+fn default_ffm_dwell_ms() -> u64 {
+    120
 }
 
 fn default_stack_offset() -> f64 {

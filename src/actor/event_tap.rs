@@ -71,6 +71,14 @@ pub enum Request {
     SetLowPowerMode(bool),
 }
 
+/// What a focus-follows-mouse hover sample should do (see State::note_ffm_hover).
+#[derive(Debug, PartialEq, Eq)]
+enum FfmHover {
+    RaiseNow(WindowServerId),
+    Armed(u64),
+    NoChange,
+}
+
 pub struct EventTap {
     events_tx: reactor::Sender,
     requests_rx: Option<Receiver>,
@@ -83,6 +91,8 @@ pub struct EventTap {
     wm_sender: wm_controller::Sender,
     stack_line_tx: stack_line::Sender,
     stack_line_hit_rects: stack_line::SharedHitRects,
+    /// Re-arm handle for the ffm dwell timer owned by the run loop (set once in run()).
+    ffm_dwell: RefCell<Option<crate::sys::timer::TimerHandle>>,
 }
 
 // SAFETY: EventTap is constructed on the input thread and all access occurs on
@@ -94,6 +104,10 @@ unsafe impl Send for EventTap {}
 struct State {
     hidden: bool,
     above_window: Option<WindowServerId>,
+    /// Window awaiting the ffm dwell confirmation (replaced on every hover change, taken on fire).
+    pending_ffm_raise: Option<WindowServerId>,
+    /// Dwell (ms) before an ffm raise; 0 = immediate (no debounce). Synced from config.
+    ffm_dwell_ms: u64,
     mouse_hides_on_focus: bool,
     focus_follows_mouse_config_enabled: bool,
     default_layout_mode: LayoutMode,
@@ -117,6 +131,8 @@ impl Default for State {
         Self {
             hidden: false,
             above_window: None,
+            pending_ffm_raise: None,
+            ffm_dwell_ms: 120,
             mouse_hides_on_focus: false,
             focus_follows_mouse_config_enabled: false,
             default_layout_mode: LayoutMode::Traditional,
@@ -235,6 +251,7 @@ impl EventTap {
         let mut state = State::default();
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
+        state.ffm_dwell_ms = config.settings.focus_follows_mouse_dwell_ms;
         state.stack_line_enabled = config.settings.ui.stack_line.enabled;
         state.default_layout_mode = config.settings.layout.mode;
         state.disable_hotkey_active = disable_hotkey
@@ -247,6 +264,7 @@ impl EventTap {
                 && (state.stack_line_enabled || Self::focus_follows_mouse_handler_enabled(&state)),
         );
         EventTap {
+            ffm_dwell: RefCell::new(None),
             events_tx,
             requests_rx: Some(requests_rx),
             state: RefCell::new(state),
@@ -294,12 +312,30 @@ impl EventTap {
 
         let watchdog = Timer::repeating(Duration::from_secs(5), Duration::from_secs(5));
 
+        // ffm dwell confirmation: armed (re-armed) by the tap callback on every hover change; fires
+        // only when the cursor has stayed on one window for the dwell — then the raise goes through.
+        let mut ffm_dwell_timer = Timer::manual();
+        *this.ffm_dwell.borrow_mut() = Some(ffm_dwell_timer.handle());
+
         let mut merged = StreamExt::merge(
             UnboundedReceiverStream::new(requests_rx).map(|(span, req)| (span, Tick::Request(req))),
             watchdog.map(|()| (Span::none(), Tick::Watchdog)),
         );
 
-        while let Some((span, tick)) = merged.next().await {
+        loop {
+            let (span, tick) = tokio::select! {
+                item = merged.next() => match item {
+                    Some(t) => t,
+                    None => break,
+                },
+                _ = ffm_dwell_timer.next() => {
+                    let pending = this.state.borrow_mut().pending_ffm_raise.take();
+                    if let Some(wsid) = pending {
+                        _ = this.events_tx.send(Event::MouseMovedOverWindow(wsid));
+                    }
+                    continue;
+                }
+            };
             let _guard = span.enter();
             match tick {
                 Tick::Request(request) => this.on_request(request),
@@ -334,6 +370,7 @@ impl EventTap {
                     warn!("Failed to warp mouse: {e:?}");
                 } else {
                     state.above_window = None;
+                    state.pending_ffm_raise = None; // warp = programmatic move; don't raise the swept window
                 }
                 if state.mouse_hides_on_focus && !state.hidden {
                     debug!("Hiding mouse");
@@ -348,6 +385,7 @@ impl EventTap {
                     warn!("Failed to warp mouse: {e:?}");
                 } else {
                     state.above_window = None;
+                    state.pending_ffm_raise = None; // warp = programmatic move; don't raise the swept window
                 }
                 if state.mouse_hides_on_focus && !state.hidden {
                     debug!("Hiding mouse");
@@ -407,6 +445,7 @@ impl EventTap {
             Request::ConfigUpdated(new_config) => {
                 let mouse_hides_on_focus = new_config.settings.mouse_hides_on_focus;
                 let focus_follows_mouse_config_enabled = new_config.settings.focus_follows_mouse;
+                state.ffm_dwell_ms = new_config.settings.focus_follows_mouse_dwell_ms;
                 let stack_line_enabled = new_config.settings.ui.stack_line.enabled;
                 let default_layout_mode = new_config.settings.layout.mode;
                 let disable_hotkey = new_config
@@ -603,8 +642,16 @@ impl EventTap {
                 {
                     let wsid = window_from_mouse_event(event);
                     if let Some(wsid) = wsid {
-                        if state.above_window_changed(wsid) {
-                            _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
+                        match state.note_ffm_hover(wsid) {
+                            FfmHover::RaiseNow(wsid) => {
+                                _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
+                            }
+                            FfmHover::Armed(dwell_ms) => {
+                                if let Some(h) = self.ffm_dwell.borrow().as_ref() {
+                                    h.set_next_fire(Duration::from_millis(dwell_ms));
+                                }
+                            }
+                            FfmHover::NoChange => {}
                         }
                     }
                 }
@@ -727,7 +774,15 @@ impl State {
         let dist_sq = dx * dx + dy * dy;
         let elapsed = timestamp.saturating_sub(self.last_mouse_move_timestamp);
 
-        if dist_sq < sampling.1 && elapsed < sampling.0 {
+        // Sample only when the move BOTH covered enough distance AND enough time has passed since the
+        // last sample — i.e. skip if it's too close OR too soon. The previous `&&` skipped a move only
+        // when it was both too-close and too-soon, so any fast movement (always far enough) blew straight
+        // past the time cap: every native HID event (up to ~1000 Hz) ran the full handler, including a
+        // synchronous WindowServer hit-test (`window_from_mouse_event` → `get_window_at_point`) inside the
+        // CGEvent tap callback. Because an event tap is in the synchronous HID delivery path, that stalled
+        // cursor/event delivery and made the system throttle the tap — the "glitchy under fast movement"
+        // jank. With `||`, the interval is a hard cap (~125 Hz) however fast the cursor travels.
+        if dist_sq < sampling.1 || elapsed < sampling.0 {
             return false;
         }
 
@@ -829,7 +884,25 @@ impl State {
         true
     }
 
+    /// ffm dwell decision for a hover sample. A fast sweep crosses many windows; raising each one
+    /// is an app activation + menu bar switch + window reorder, and ~10/s of those saturate
+    /// WindowServer (measured: border/overlay updates then composite 100-200 ms late — the
+    /// "border trails the mouse" jank). So a hover only ARMS a raise; the dwell timer fires it iff
+    /// the cursor is still on that window dwell_ms later. Each hover change replaces the pending
+    /// window and pushes the timer forward, so sweeping raises nothing until the cursor settles.
+    fn note_ffm_hover(&mut self, wsid: WindowServerId) -> FfmHover {
+        if !self.above_window_changed(wsid) {
+            return FfmHover::NoChange;
+        }
+        if self.ffm_dwell_ms == 0 {
+            return FfmHover::RaiseNow(wsid); // dwell disabled: legacy immediate raise
+        }
+        self.pending_ffm_raise = Some(wsid);
+        FfmHover::Armed(self.ffm_dwell_ms)
+    }
+
     fn reset(&mut self, enabled: bool) {
+        self.pending_ffm_raise = None; // toggling ffm must never fire a stale dwell raise
         if enabled {
             self.above_window = None;
             self.last_mouse_move_loc = None;
@@ -929,5 +1002,78 @@ mod tests {
             state.layout_mode_at_point(CGPoint::new(150.0, 50.0)),
             Some(crate::common::config::LayoutMode::Scrolling)
         );
+    }
+
+    // Regression: fast mouse movement must stay time-capped. A torrent of large, sub-interval moves
+    // (a mouse whipped across the screen) used to bypass the throttle entirely — the `&&` only skipped
+    // moves that were both too-close AND too-soon, so every far-enough HID event sampled, running a
+    // synchronous WindowServer hit-test in the event tap and stuttering the cursor. With the `||` cap,
+    // only ~1 sample per interval passes however fast and far the cursor travels.
+    #[test]
+    fn fast_movement_is_time_capped() {
+        let mut state = State::default();
+        let sampling = (
+            MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL,
+            MOUSE_MOVE_MIN_DISTANCE_PX_SQ_NORMAL,
+        );
+        // First move always samples (no prior reference) and arms the clock at t=0.
+        assert!(state.should_sample_mouse_move(CGPoint::new(0.0, 0.0), 0, sampling));
+
+        // 50 huge jumps (200px each, way over the distance floor) arriving every 1ms — a 50ms span. Every
+        // one is "far enough", so under the old `&&` ~49 would sample (one synchronous hit-test each). With
+        // the time cap they collapse to ~one per 8ms interval: at 125 Hz a 50ms span allows ≤7 samples.
+        let mut sampled = 0;
+        for i in 1..=50u64 {
+            let x = (i as f64) * 200.0;
+            if state.should_sample_mouse_move(CGPoint::new(x, 0.0), i * 1_000_000, sampling) {
+                sampled += 1;
+            }
+        }
+        assert!(
+            (1..=7).contains(&sampled),
+            "fast movement must be capped to ~125 Hz (≤7 over 50ms), got {sampled} (old &&: ~49)"
+        );
+    }
+
+    // The ffm dwell decision: sweeping across windows must only ARM (replacing the pending window),
+    // never raise directly; the same window twice is a no-op; dwell=0 keeps the legacy immediate raise.
+    #[test]
+    fn ffm_hover_arms_and_replaces_instead_of_raising() {
+        let mut state = State::default();
+        state.ffm_dwell_ms = 120;
+        let a = WindowServerId::new(1);
+        let b = WindowServerId::new(2);
+        assert_eq!(state.note_ffm_hover(a), FfmHover::Armed(120));
+        assert_eq!(state.pending_ffm_raise, Some(a));
+        assert_eq!(state.note_ffm_hover(a), FfmHover::NoChange, "same window: no re-arm");
+        assert_eq!(state.note_ffm_hover(b), FfmHover::Armed(120), "sweep: replace pending");
+        assert_eq!(state.pending_ffm_raise, Some(b), "only the LAST hovered window can be raised");
+        state.reset(true);
+        assert_eq!(state.pending_ffm_raise, None, "ffm toggle clears any pending raise");
+    }
+
+    #[test]
+    fn ffm_hover_zero_dwell_raises_immediately() {
+        let mut state = State::default();
+        state.ffm_dwell_ms = 0;
+        let a = WindowServerId::new(7);
+        assert_eq!(state.note_ffm_hover(a), FfmHover::RaiseNow(a));
+        assert_eq!(state.pending_ffm_raise, None);
+    }
+
+    // A move past the interval but with negligible distance (resting-hand jitter) is still skipped, so
+    // we don't resample the WindowServer on a stationary cursor.
+    #[test]
+    fn slow_jitter_below_distance_floor_is_skipped() {
+        let mut state = State::default();
+        let sampling = (
+            MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL,
+            MOUSE_MOVE_MIN_DISTANCE_PX_SQ_NORMAL,
+        );
+        assert!(state.should_sample_mouse_move(CGPoint::new(100.0, 100.0), 0, sampling));
+        // 20ms later (well past the cap) but only 1px away → below the 2px floor → skip.
+        assert!(!state.should_sample_mouse_move(CGPoint::new(101.0, 100.0), 20_000_000, sampling));
+        // A real 3px move after the interval samples.
+        assert!(state.should_sample_mouse_move(CGPoint::new(104.0, 100.0), 40_000_000, sampling));
     }
 }
