@@ -68,6 +68,14 @@ pub enum Request {
     SetLowPowerMode(bool),
 }
 
+/// What a focus-follows-mouse hover sample should do (see State::note_ffm_hover).
+#[derive(Debug, PartialEq, Eq)]
+enum FfmHover {
+    RaiseNow(WindowServerId),
+    Armed(u64),
+    NoChange,
+}
+
 pub struct EventTap {
     events_tx: reactor::Sender,
     requests_rx: Option<Receiver>,
@@ -83,6 +91,8 @@ pub struct EventTap {
     wm_sender: wm_controller::Sender,
     stack_line_tx: stack_line::Sender,
     stack_line_hit_rects: stack_line::SharedHitRects,
+    /// Re-arm handle for the ffm dwell timer owned by the run loop (set once in run()).
+    ffm_dwell: RefCell<Option<crate::sys::timer::TimerHandle>>,
 }
 
 // SAFETY: EventTap is constructed on the input thread and all access occurs on
@@ -93,6 +103,11 @@ unsafe impl Send for EventTap {}
 
 struct State {
     hide_count: u32,
+    above_window: Option<WindowServerId>,
+    /// Window awaiting the ffm dwell confirmation (replaced on every hover change, taken on fire).
+    pending_ffm_raise: Option<WindowServerId>,
+    /// Dwell (ms) before an ffm raise; 0 = immediate (no debounce). Synced from config.
+    ffm_dwell_ms: u64,
     mouse_hides_on_focus: bool,
     focus_follows_mouse_config_enabled: bool,
     default_layout_mode: LayoutMode,
@@ -121,6 +136,9 @@ impl Default for State {
     fn default() -> Self {
         Self {
             hide_count: 0,
+            above_window: None,
+            pending_ffm_raise: None,
+            ffm_dwell_ms: 120,
             mouse_hides_on_focus: false,
             focus_follows_mouse_config_enabled: false,
             default_layout_mode: LayoutMode::Traditional,
@@ -236,6 +254,7 @@ impl EventTap {
         let mut state = State::default();
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
+        state.ffm_dwell_ms = config.settings.focus_follows_mouse_dwell_ms;
         state.stack_line_enabled = config.settings.ui.stack_line.enabled;
         state.default_layout_mode = config.settings.layout.mode;
         state.disable_hotkey_active = disable_hotkey
@@ -249,6 +268,7 @@ impl EventTap {
         );
         let mouse_move_min_interval_ns = mouse_move_sampling_profile(state.low_power_mode);
         EventTap {
+            ffm_dwell: RefCell::new(None),
             events_tx,
             requests_rx: Some(requests_rx),
             state: RefCell::new(state),
@@ -300,12 +320,30 @@ impl EventTap {
 
         let watchdog = Timer::repeating(Duration::from_secs(5), Duration::from_secs(5));
 
+        // ffm dwell confirmation: armed (re-armed) by the tap callback on every hover change; fires
+        // only when the cursor has stayed on one window for the dwell — then the raise goes through.
+        let mut ffm_dwell_timer = Timer::manual();
+        *this.ffm_dwell.borrow_mut() = Some(ffm_dwell_timer.handle());
+
         let mut merged = StreamExt::merge(
             UnboundedReceiverStream::new(requests_rx).map(|(span, req)| (span, Tick::Request(req))),
             watchdog.map(|()| (Span::none(), Tick::Watchdog)),
         );
 
-        while let Some((span, tick)) = merged.next().await {
+        loop {
+            let (span, tick) = tokio::select! {
+                item = merged.next() => match item {
+                    Some(t) => t,
+                    None => break,
+                },
+                _ = ffm_dwell_timer.next() => {
+                    let pending = this.state.borrow_mut().pending_ffm_raise.take();
+                    if let Some(wsid) = pending {
+                        _ = this.events_tx.send(Event::MouseMoved(wsid));
+                    }
+                    continue;
+                }
+            };
             let _guard = span.enter();
             match tick {
                 Tick::Request(request) => this.on_request(request),
@@ -339,6 +377,9 @@ impl EventTap {
                 self.reset_mouse_window();
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
+                } else {
+                    state.above_window = None;
+                    state.pending_ffm_raise = None; // warp = programmatic move; don't raise the swept window
                 }
                 if state.mouse_hides_on_focus && state.hide_count == 0 {
                     debug!("Hiding mouse");
@@ -346,17 +387,16 @@ impl EventTap {
                 }
             }
             Request::WarpSilent(point) => {
+                self.reset_mouse_window();
                 if let Err(e) = event::warp_mouse_silent(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 } else {
                     state.above_window = None;
+                    state.pending_ffm_raise = None; // warp = programmatic move; don't raise the swept window
                 }
-                if state.mouse_hides_on_focus && !state.hidden {
+                if state.mouse_hides_on_focus && state.hide_count == 0 {
                     debug!("Hiding mouse");
-                    if let Err(e) = event::hide_mouse() {
-                        warn!("Failed to hide mouse: {e:?}");
-                    }
-                    state.hidden = true;
+                    state.hide_mouse();
                 }
             }
             Request::EnforceHidden => {
@@ -422,6 +462,7 @@ impl EventTap {
                     let prev_stack_line_enabled = state.stack_line_enabled;
                     state.mouse_hides_on_focus = mouse_hides_on_focus;
                     state.focus_follows_mouse_config_enabled = focus_follows_mouse_config_enabled;
+                    state.ffm_dwell_ms = new_config.settings.focus_follows_mouse_dwell_ms;
                     state.stack_line_enabled = stack_line_enabled;
                     state.default_layout_mode = default_layout_mode;
                     let prev_active = state.disable_hotkey_active;
@@ -694,7 +735,20 @@ impl EventTap {
             });
             if let Some(window) = window {
                 window_server::note_windowserver_activity(window.as_u32());
-                _ = self.events_tx.send(Event::MouseMoved(window));
+                match state.note_ffm_hover(window) {
+                    FfmHover::RaiseNow(wsid) => {
+                        _ = self.events_tx.send(Event::MouseMoved(wsid));
+                    }
+                    FfmHover::Armed(dwell_ms) => {
+                        if let Some(h) = self.ffm_dwell.borrow().as_ref() {
+                            h.set_next_fire(Duration::from_millis(dwell_ms));
+                        }
+                    }
+                    FfmHover::NoChange => {}
+                }
+            } else {
+                state.pending_ffm_raise = None;
+                state.above_window = None;
             }
         }
 
@@ -945,8 +999,36 @@ impl State {
         }
     }
 
+    /// Returns true if the window under the cursor changed.
+    fn above_window_changed(&mut self, wsid: WindowServerId) -> bool {
+        if self.above_window == Some(wsid) {
+            return false;
+        }
+        self.above_window = Some(wsid);
+        true
+    }
+
+    /// ffm dwell decision for a hover sample. A fast sweep crosses many windows; raising each one
+    /// is an app activation + menu bar switch + window reorder, and ~10/s of those saturate
+    /// WindowServer (measured: border/overlay updates then composite 100-200 ms late — the
+    /// "border trails the mouse" jank). So a hover only ARMS a raise; the dwell timer fires it iff
+    /// the cursor is still on that window dwell_ms later. Each hover change replaces the pending
+    /// window and pushes the timer forward, so sweeping raises nothing until the cursor settles.
+    fn note_ffm_hover(&mut self, wsid: WindowServerId) -> FfmHover {
+        if !self.above_window_changed(wsid) {
+            return FfmHover::NoChange;
+        }
+        if self.ffm_dwell_ms == 0 {
+            return FfmHover::RaiseNow(wsid); // dwell disabled: legacy immediate raise
+        }
+        self.pending_ffm_raise = Some(wsid);
+        FfmHover::Armed(self.ffm_dwell_ms)
+    }
+
     fn reset(&mut self, enabled: bool) {
+        self.pending_ffm_raise = None; // toggling ffm must never fire a stale dwell raise
         if enabled {
+            self.above_window = None;
             self.reset_mouse_sampling();
         }
     }
@@ -1034,5 +1116,31 @@ mod tests {
             state.layout_mode_at_point(CGPoint::new(150.0, 50.0)),
             Some(crate::common::config::LayoutMode::Scrolling)
         );
+    }
+
+    // The ffm dwell decision: sweeping across windows must only ARM (replacing the pending window),
+    // never raise directly; the same window twice is a no-op; dwell=0 keeps the legacy immediate raise.
+    #[test]
+    fn ffm_hover_arms_and_replaces_instead_of_raising() {
+        let mut state = State::default();
+        state.ffm_dwell_ms = 120;
+        let a = WindowServerId::new(1);
+        let b = WindowServerId::new(2);
+        assert_eq!(state.note_ffm_hover(a), FfmHover::Armed(120));
+        assert_eq!(state.pending_ffm_raise, Some(a));
+        assert_eq!(state.note_ffm_hover(a), FfmHover::NoChange, "same window: no re-arm");
+        assert_eq!(state.note_ffm_hover(b), FfmHover::Armed(120), "sweep: replace pending");
+        assert_eq!(state.pending_ffm_raise, Some(b), "only the LAST hovered window can be raised");
+        state.reset(true);
+        assert_eq!(state.pending_ffm_raise, None, "ffm toggle clears any pending raise");
+    }
+
+    #[test]
+    fn ffm_hover_zero_dwell_raises_immediately() {
+        let mut state = State::default();
+        state.ffm_dwell_ms = 0;
+        let a = WindowServerId::new(7);
+        assert_eq!(state.note_ffm_hover(a), FfmHover::RaiseNow(a));
+        assert_eq!(state.pending_ffm_raise, None);
     }
 }

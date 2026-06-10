@@ -362,6 +362,10 @@ pub struct Settings {
     pub restore_cursor_position_per_workspace: bool,
     #[serde(default = "yes")]
     pub focus_follows_mouse: bool,
+    /// Dwell (ms) the cursor must stay over a window before focus-follows-mouse raises it.
+    /// 0 = raise immediately (legacy).
+    #[serde(default = "default_ffm_dwell_ms")]
+    pub focus_follows_mouse_dwell_ms: u64,
     /// Hotkey that disables focus-follows-mouse while held.
     /// Accepts either a full hotkey (e.g. "Ctrl + A") or a modifier-only spec (e.g. "Ctrl")
     #[serde(default)]
@@ -1130,6 +1134,8 @@ impl InnerGaps {
 }
 
 fn yes() -> bool { true }
+
+fn default_ffm_dwell_ms() -> u64 { 120 }
 
 fn default_stack_offset() -> f64 { 40.0 }
 
