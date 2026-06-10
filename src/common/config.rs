@@ -631,6 +631,12 @@ pub struct LayoutSettings {
     /// Scrolling layout configuration (niri-style columns)
     #[serde(default)]
     pub scrolling: ScrollingLayoutSettings,
+    /// When the focused window is fullscreen, directional focus moves TRANSFER the fullscreen to
+    /// the neighbouring window (same workspace, same variant) instead of focusing a window hidden
+    /// behind the fullscreen one. At the workspace boundary nothing happens — the fullscreen never
+    /// hops displays. Default off (stock behavior).
+    #[serde(default)]
+    pub fullscreen_follows_focus: bool,
 }
 
 /// Layout mode enum

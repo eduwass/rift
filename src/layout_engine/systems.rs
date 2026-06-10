@@ -149,6 +149,10 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
     fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool;
+    /// Which fullscreen flag (if any) the current selection carries: (fullscreen, within_gaps).
+    /// The engine's fullscreen-follows-focus transfer uses this to lift and re-apply the SAME
+    /// variant around a directional focus move.
+    fn selection_fullscreen_flags(&self, layout: LayoutId) -> (bool, bool);
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction);
     fn apply_stacking_to_parent_of_selection(

@@ -1476,6 +1476,18 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
+    fn selection_fullscreen_flags(&self, layout: LayoutId) -> (bool, bool) {
+        if let Some(sel) = self.selection_of_layout(layout) {
+            let sel_leaf = self.descend_to_leaf(sel);
+            if let Some(NodeKind::Leaf { fullscreen, fullscreen_within_gaps, .. }) =
+                self.kind.get(sel_leaf)
+            {
+                return (*fullscreen, *fullscreen_within_gaps);
+            }
+        }
+        (false, false)
+    }
+
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let Some(sel) = self.selection_of_layout(layout) else {
             return;
