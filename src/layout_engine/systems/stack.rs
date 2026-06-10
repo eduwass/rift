@@ -310,6 +310,10 @@ impl LayoutSystem for StackLayoutSystem {
         self.inner.has_any_fullscreen_node(layout)
     }
 
+    fn selection_fullscreen_flags(&self, layout: LayoutId) -> (bool, bool) {
+        self.inner.selection_fullscreen_flags(layout)
+    }
+
     fn join_selection_with_direction(&mut self, _layout: LayoutId, _direction: Direction) {}
 
     fn apply_stacking_to_parent_of_selection(

@@ -1362,6 +1362,19 @@ impl LayoutSystem for ScrollingLayoutSystem {
         !state.fullscreen.is_empty() || !state.fullscreen_within_gaps.is_empty()
     }
 
+    fn selection_fullscreen_flags(&self, layout: LayoutId) -> (bool, bool) {
+        let Some(state) = self.layout_state(layout) else {
+            return (false, false);
+        };
+        let Some(selected) = state.selected_or_first() else {
+            return (false, false);
+        };
+        (
+            state.fullscreen.contains(&selected),
+            state.fullscreen_within_gaps.contains(&selected),
+        )
+    }
+
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let Some(state) = self.layout_state_mut(layout) else {
             return;

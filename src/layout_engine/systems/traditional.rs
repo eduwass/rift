@@ -769,6 +769,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
             .any(|node| self.tree.data.layout.is_effectively_fullscreen(node))
     }
 
+    fn selection_fullscreen_flags(&self, layout: LayoutId) -> (bool, bool) {
+        self.tree.data.layout.fullscreen_flags(self.selection(layout))
+    }
+
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let mut selection = self.selection(layout);
 
@@ -2513,6 +2517,11 @@ impl Layout {
     fn is_effectively_fullscreen(&self, node: NodeId) -> bool {
         let info = &self.info[node];
         info.is_fullscreen || info.is_fullscreen_within_gaps
+    }
+
+    fn fullscreen_flags(&self, node: NodeId) -> (bool, bool) {
+        let info = &self.info[node];
+        (info.is_fullscreen, info.is_fullscreen_within_gaps)
     }
 
     fn debug(&self, node: NodeId, is_container: bool) -> String {

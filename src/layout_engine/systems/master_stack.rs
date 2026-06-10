@@ -852,6 +852,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.has_any_fullscreen_node(layout)
     }
 
+    fn selection_fullscreen_flags(&self, layout: LayoutId) -> (bool, bool) {
+        self.inner.selection_fullscreen_flags(layout)
+    }
+
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let _ = direction;
         self.normalize_layout(layout);

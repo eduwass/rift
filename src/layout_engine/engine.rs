@@ -803,13 +803,45 @@ impl LayoutEngine {
                 && self.layout_settings.scrolling.focus_boundary_behavior
                     == ScrollingFocusBoundaryBehavior::Stop;
 
+        // Fullscreen-follows-focus (config: layout.fullscreen_follows_focus): when the selection
+        // itself is fullscreen, a directional move TRANSFERS the fullscreen to the neighbour
+        // instead of focusing a window hidden behind the fullscreen one. Lift the flag before the
+        // move and re-apply the same variant to whatever is selected afterwards — on a boundary
+        // hit the selection has been restored by then, so the original node re-fullscreens and the
+        // fullscreen stays confined to its workspace (no cross-space hop).
+        let (sel_fs, sel_fs_gaps) = if self.layout_settings.fullscreen_follows_focus {
+            self.workspace_tree(ws_id).selection_fullscreen_flags(layout)
+        } else {
+            (false, false)
+        };
+        let transfer_fullscreen = sel_fs || sel_fs_gaps;
+        if transfer_fullscreen {
+            let _ = if sel_fs {
+                self.workspace_tree_mut(ws_id).toggle_fullscreen_of_selection(layout)
+            } else {
+                self.workspace_tree_mut(ws_id).toggle_fullscreen_within_gaps_of_selection(layout)
+            };
+        }
+
         let (focus_window_raw, raise_windows) =
             self.workspace_tree_mut(ws_id).move_focus(layout, direction);
         let focus_window =
             self.filter_active_workspace_window(window_store, space, focus_window_raw);
-        let raise_windows =
+        let mut raise_windows =
             self.filter_active_workspace_windows(window_store, space, raise_windows);
         if focus_window.is_some() {
+            if transfer_fullscreen {
+                let fs_windows = if sel_fs {
+                    self.workspace_tree_mut(ws_id).toggle_fullscreen_of_selection(layout)
+                } else {
+                    self.workspace_tree_mut(ws_id).toggle_fullscreen_within_gaps_of_selection(layout)
+                };
+                for wid in fs_windows {
+                    if !raise_windows.contains(&wid) {
+                        raise_windows.push(wid);
+                    }
+                }
+            }
             let response = EventResponse {
                 focus_window,
                 raise_windows,
@@ -820,6 +852,16 @@ impl LayoutEngine {
         } else {
             if let Some(prev_wid) = previous_selection {
                 let _ = self.workspace_tree_mut(ws_id).select_window(layout, prev_wid);
+            }
+            if transfer_fullscreen {
+                // Boundary: re-fullscreen the original (restored) selection and stop — the
+                // fullscreen never hops to an adjacent display/workspace.
+                let _ = if sel_fs {
+                    self.workspace_tree_mut(ws_id).toggle_fullscreen_of_selection(layout)
+                } else {
+                    self.workspace_tree_mut(ws_id).toggle_fullscreen_within_gaps_of_selection(layout)
+                };
+                return EventResponse::default();
             }
             if !scrolling_stops_at_boundary
                 && let Some(new_space) = self.next_space_for_direction(
@@ -3207,6 +3249,197 @@ mod tests {
         assert!(
             result.is_ok(),
             "cross-space move focus should not panic when adjacent space is not initialized"
+        );
+    }
+
+    // ---- fullscreen_follows_focus: directional focus transfers the fullscreen flag ----
+
+    fn fullscreen_test_engine(
+        follows: bool,
+    ) -> (
+        WindowStore,
+        LayoutEngine,
+        SpaceId,
+        WindowId,
+        WindowId,
+        Vec<SpaceId>,
+        HashMap<SpaceId, CGPoint>,
+    ) {
+        let mut window_store = WindowStore::default();
+        let mut engine = test_engine();
+        let mut settings = LayoutSettings::default();
+        settings.fullscreen_follows_focus = follows;
+        engine.set_layout_settings(&settings);
+
+        let space = SpaceId::new(60);
+        let screen = CGSize::new(1920.0, 1080.0);
+        let window_a = WindowId::new(1, 1);
+        let window_b = WindowId::new(1, 2);
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowsOnScreenUpdated(
+                space,
+                1,
+                vec![window_info(window_a), window_info(window_b)],
+                None,
+            ),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowFocused(space, window_a),
+        );
+        (window_store, engine, space, window_a, window_b, vec![space], HashMap::default())
+    }
+
+    fn selection_flags(engine: &LayoutEngine, space: SpaceId) -> (bool, bool) {
+        let (ws_id, layout) = engine.workspace_and_layout(space).unwrap();
+        engine.workspace_tree(ws_id).selection_fullscreen_flags(layout)
+    }
+
+    #[test]
+    fn move_focus_transfers_fullscreen_to_neighbor() {
+        let (mut window_store, mut engine, space, window_a, window_b, spaces, centers) =
+            fullscreen_test_engine(true);
+        let _ = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &spaces,
+            &centers,
+            LayoutCommand::ToggleFullscreen,
+        );
+        assert_eq!(selection_flags(&engine, space), (true, false));
+
+        let response = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &spaces,
+            &centers,
+            LayoutCommand::MoveFocus(Direction::Right),
+        );
+        assert_eq!(response.focus_window, Some(window_b), "focus moves to the neighbor");
+        assert_eq!(
+            selection_flags(&engine, space),
+            (true, false),
+            "the neighbor inherits the fullscreen flag"
+        );
+        assert!(
+            response.raise_windows.contains(&window_b),
+            "the newly fullscreened window is raised"
+        );
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowFocused(space, window_a),
+        );
+        assert_eq!(
+            selection_flags(&engine, space),
+            (false, false),
+            "the previous window dropped its fullscreen flag"
+        );
+    }
+
+    #[test]
+    fn move_focus_at_boundary_keeps_fullscreen_confined() {
+        let (mut window_store, mut engine, space, _a, window_b, spaces, centers) =
+            fullscreen_test_engine(true);
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowFocused(space, window_b),
+        );
+        let _ = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &spaces,
+            &centers,
+            LayoutCommand::ToggleFullscreen,
+        );
+        assert_eq!(selection_flags(&engine, space), (true, false));
+
+        // window_b is the rightmost window and there is no adjacent space: nothing must change.
+        let response = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &spaces,
+            &centers,
+            LayoutCommand::MoveFocus(Direction::Right),
+        );
+        assert_eq!(response.focus_window, None, "boundary: no focus change");
+        let (ws_id, layout) = engine.workspace_and_layout(space).unwrap();
+        assert_eq!(
+            engine.workspace_tree(ws_id).selected_window(layout),
+            Some(window_b),
+            "boundary: selection restored to the fullscreen window"
+        );
+        assert_eq!(
+            selection_flags(&engine, space),
+            (true, false),
+            "boundary: the original window stays fullscreen"
+        );
+    }
+
+    #[test]
+    fn move_focus_without_flag_leaves_fullscreen_in_place() {
+        let (mut window_store, mut engine, space, window_a, window_b, spaces, centers) =
+            fullscreen_test_engine(false);
+        let _ = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &spaces,
+            &centers,
+            LayoutCommand::ToggleFullscreen,
+        );
+
+        let response = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &spaces,
+            &centers,
+            LayoutCommand::MoveFocus(Direction::Right),
+        );
+        assert_eq!(response.focus_window, Some(window_b), "stock behavior: focus still moves");
+        assert_eq!(
+            selection_flags(&engine, space),
+            (false, false),
+            "stock behavior: the neighbor is not fullscreened"
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowFocused(space, window_a),
+        );
+        assert_eq!(
+            selection_flags(&engine, space),
+            (true, false),
+            "stock behavior: the original window keeps its fullscreen flag"
+        );
+    }
+
+    #[test]
+    fn move_focus_transfers_within_gaps_variant() {
+        let (mut window_store, mut engine, space, _a, window_b, spaces, centers) =
+            fullscreen_test_engine(true);
+        let _ = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &spaces,
+            &centers,
+            LayoutCommand::ToggleFullscreenWithinGaps,
+        );
+        assert_eq!(selection_flags(&engine, space), (false, true));
+
+        let response = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &spaces,
+            &centers,
+            LayoutCommand::MoveFocus(Direction::Right),
+        );
+        assert_eq!(response.focus_window, Some(window_b));
+        assert_eq!(
+            selection_flags(&engine, space),
+            (false, true),
+            "the within-gaps variant transfers as within-gaps, not plain fullscreen"
         );
     }
 
