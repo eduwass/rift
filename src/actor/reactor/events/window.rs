@@ -448,21 +448,81 @@ impl WindowEventHandler {
     }
 
     pub fn handle_mouse_moved_over_window(reactor: &mut Reactor, wsid: WindowServerId) {
+        // FFM latency probe (always on, threshold-gated so it's near-free): focus-follows-mouse felt
+        // laggy and the renderer/IPC were measured clean, so the suspect is this handler running on the
+        // reactor's serial thread. Time each phase and warn! on a slow call, plus a periodic summary of
+        // call/emit rate — so /tmp/rift_<user>.err.log shows exactly where a fast mouse sweep stalls.
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        thread_local! {
+            static FFM_CALLS: Cell<u64> = const { Cell::new(0) };
+            static FFM_EMITS: Cell<u64> = const { Cell::new(0) };
+            static FFM_LAST_CALL: Cell<Option<Instant>> = const { Cell::new(None) };
+            static FFM_LAST_REPORT: Cell<Option<Instant>> = const { Cell::new(None) };
+            static FFM_SUM_US: Cell<u64> = const { Cell::new(0) };
+        }
+        let t_start = Instant::now();
+        let since_last = FFM_LAST_CALL.with(|c| c.replace(Some(t_start)).map(|p| t_start - p));
+        FFM_CALLS.with(|c| c.set(c.get() + 1));
+
         let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) else {
             return;
         };
-        if !reactor.should_raise_on_mouse_over(wid) {
+        let t_gate = Instant::now();
+        let allowed = reactor.should_raise_on_mouse_over(wid);
+        let gate_us = t_gate.elapsed().as_micros() as u64;
+        if !allowed {
             return;
         }
 
+        let t_raise = Instant::now();
         reactor.raise_window(wid, Quiet::No, None);
+        let raise_us = t_raise.elapsed().as_micros() as u64;
 
+        let mut bcast_us = 0u64;
         if let Some(window) = reactor.window_manager.windows.get(&wid) {
             if let Some(space) =
                 active_space_for_window(reactor, &window.frame_monotonic, window.info.sys_id)
             {
                 reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+                let t_b = Instant::now();
                 reactor.broadcast_window_focused(wid, space);
+                bcast_us = t_b.elapsed().as_micros() as u64;
+                FFM_EMITS.with(|c| c.set(c.get() + 1));
+            }
+        }
+
+        let total_us = t_start.elapsed().as_micros() as u64;
+        FFM_SUM_US.with(|c| c.set(c.get() + total_us));
+        if total_us > 5_000 {
+            warn!(
+                total_us,
+                gate_us,
+                raise_us,
+                bcast_us,
+                gap_ms = since_last.map(|d| d.as_millis() as u64).unwrap_or(0),
+                "ffm-perf slow handle_mouse_moved_over_window"
+            );
+        }
+        let now = Instant::now();
+        let report = FFM_LAST_REPORT.with(|c| match c.get() {
+            Some(p) if now - p < Duration::from_millis(1000) => false,
+            _ => {
+                c.set(Some(now));
+                true
+            }
+        });
+        if report {
+            let calls = FFM_CALLS.with(|c| c.replace(0));
+            let emits = FFM_EMITS.with(|c| c.replace(0));
+            let sum_us = FFM_SUM_US.with(|c| c.replace(0));
+            if calls > 0 {
+                warn!(
+                    calls,
+                    emits,
+                    avg_us = sum_us / calls,
+                    "ffm-perf 1s summary (calls=handler invocations, emits=window_focused broadcasts)"
+                );
             }
         }
     }
