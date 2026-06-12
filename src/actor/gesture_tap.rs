@@ -24,6 +24,9 @@ use crate::layout_engine::LayoutCommand as LC;
 use crate::sys::haptics;
 use crate::sys::screen::SpaceId;
 
+const NATIVE_MISSION_CONTROL_FINGERS: usize = 4;
+const NATIVE_MISSION_CONTROL_VERTICAL_THRESHOLD: f64 = 0.03;
+
 #[derive(Debug)]
 pub enum GestureRequest {
     ConfigUpdated(Config),
@@ -40,6 +43,7 @@ pub struct GestureTap {
     wm_sender: wm_controller::Sender,
     swipe: RefCell<Option<SwipeHandler>>,
     scroll: RefCell<Option<ScrollHandler>>,
+    native_mission_control_preflight: RefCell<NativeMissionControlPreflight>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     screen_spaces: RefCell<Vec<(CGRect, SpaceId)>>,
     layout_mode_by_space: RefCell<HashMap<SpaceId, LayoutMode>>,
@@ -108,6 +112,13 @@ enum GesturePhase {
 struct SwipeHandler {
     cfg: SwipeConfig,
     state: RefCell<SwipeState>,
+}
+
+#[derive(Default, Debug)]
+struct NativeMissionControlPreflight {
+    armed: bool,
+    fired: bool,
+    start_y: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +193,7 @@ impl GestureTap {
             wm_sender,
             swipe: RefCell::new(swipe),
             scroll: RefCell::new(scroll),
+            native_mission_control_preflight: RefCell::new(NativeMissionControlPreflight::default()),
             tap: RefCell::new(None),
             screen_spaces: RefCell::new(Vec::new()),
             layout_mode_by_space: RefCell::new(HashMap::default()),
@@ -195,9 +207,7 @@ impl GestureTap {
 
         let this = Rc::new(self);
 
-        if this.gesture_handlers_enabled() {
-            this.create_and_install_tap();
-        }
+        this.create_and_install_tap();
 
         while let Some((span, request)) = requests_rx.recv().await {
             let _guard = span.enter();
@@ -264,20 +274,12 @@ impl GestureTap {
     fn update_gesture_handlers(self: &Rc<Self>) {
         let config = self.config.borrow();
         let (swipe, scroll) = Self::build_gesture_handlers(&config);
-        let was_enabled = self.gesture_handlers_enabled();
         *self.swipe.borrow_mut() = swipe;
         *self.scroll.borrow_mut() = scroll;
-        let is_enabled = self.gesture_handlers_enabled();
 
-        if !was_enabled && is_enabled {
+        if self.tap.borrow().is_none() {
             self.create_and_install_tap();
-        } else if was_enabled && !is_enabled {
-            *self.tap.borrow_mut() = None;
         }
-    }
-
-    fn gesture_handlers_enabled(&self) -> bool {
-        self.swipe.borrow().is_some() || self.scroll.borrow().is_some()
     }
 
     fn create_and_install_tap(self: &Rc<Self>) {
@@ -307,15 +309,17 @@ impl GestureTap {
             return;
         }
 
-        let scroll_handler = self.scroll.borrow();
-        let swipe_handler = self.swipe.borrow();
-        if scroll_handler.is_none() && swipe_handler.is_none() {
-            return;
-        }
-
         if let Some(nsevent) = NSEvent::eventWithCGEvent(event)
             && nsevent.r#type() == NSEventType::Gesture
         {
+            self.handle_native_mission_control_preflight(&nsevent);
+
+            let scroll_handler = self.scroll.borrow();
+            let swipe_handler = self.swipe.borrow();
+            if scroll_handler.is_none() && swipe_handler.is_none() {
+                return;
+            }
+
             let cursor = CGEvent::location(Some(event));
             let mode =
                 self.layout_mode_at_point(cursor).unwrap_or(*self.default_layout_mode.borrow());
@@ -325,6 +329,49 @@ impl GestureTap {
             } else if let Some(handler) = swipe_handler.as_ref() {
                 self.handle_gesture_event(handler, &nsevent);
             }
+        }
+    }
+
+    fn handle_native_mission_control_preflight(&self, nsevent: &NSEvent) {
+        let phase = nsevent.phase();
+        if matches!(phase, NSEventPhase::Ended | NSEventPhase::Cancelled | NSEventPhase::Began) {
+            *self.native_mission_control_preflight.borrow_mut() =
+                NativeMissionControlPreflight::default();
+            return;
+        }
+
+        let mut sum_y = 0.0f64;
+        let mut touch_count = 0usize;
+        let mut active_count = 0usize;
+
+        for t in nsevent.allTouches().iter() {
+            let phase = t.phase();
+            let ended =
+                phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
+            touch_count += 1;
+            if !ended && let Some((_x, y)) = touch_normalized_position(&t) {
+                sum_y += y;
+                active_count += 1;
+            }
+        }
+
+        if touch_count < NATIVE_MISSION_CONTROL_FINGERS || active_count == 0 {
+            *self.native_mission_control_preflight.borrow_mut() =
+                NativeMissionControlPreflight::default();
+            return;
+        }
+
+        let avg_y = sum_y / active_count as f64;
+        let mut st = self.native_mission_control_preflight.borrow_mut();
+        if !st.armed {
+            st.armed = true;
+            st.start_y = avg_y;
+            return;
+        }
+
+        if !st.fired && (avg_y - st.start_y).abs() >= NATIVE_MISSION_CONTROL_VERTICAL_THRESHOLD {
+            st.fired = true;
+            self.wm_sender.send(WmEvent::NativeMissionControlGestureBegan);
         }
     }
 

@@ -46,6 +46,7 @@ pub enum WmEvent {
     SystemWoke,
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
+    NativeMissionControlGestureBegan,
     ConfigUpdated(crate::common::config::Config),
     Command(WmCommand),
 }
@@ -197,6 +198,9 @@ impl WmController {
 
         match event {
             SystemWoke => self.events_tx.send(Event::SystemWoke),
+            NativeMissionControlGestureBegan => {
+                self.events_tx.send(Event::MissionControlNativeEntered)
+            }
             DisplayChurnBegin => self.events_tx.send(Event::DisplayChurnBegin),
             DisplayChurnEnd => self.events_tx.send(Event::DisplayChurnEnd),
             AppEventsRegistered => {
