@@ -818,6 +818,9 @@ impl EventTap {
                     modifiers_from_flags_with_keys(state.current_flags, &state.pressed_keys),
                     key_code,
                 );
+                if native_mission_control_hotkey(&hotkey) {
+                    _ = self.events_tx.send(Event::MissionControlNativeEntered);
+                }
                 let bindings = self.hotkeys.load();
                 if let Some(commands) = bindings.get(&hotkey) {
                     // A held key generates repeated KeyDown events. Hotkeys
@@ -1051,6 +1054,12 @@ fn mouse_window_hint(event: &CGEvent) -> Option<WindowServerId> {
     let field_value =
         CGEvent::integer_value_field(Some(event), CGEventField::MouseEventWindowUnderMousePointer);
     u32::try_from(field_value).ok().filter(|id| *id != 0).map(WindowServerId::new)
+}
+
+#[inline]
+fn native_mission_control_hotkey(hotkey: &Hotkey) -> bool {
+    hotkey.key_code == KeyCode::F3
+        || (hotkey.key_code == KeyCode::ArrowUp && hotkey.modifiers.intersects(Modifiers::CONTROL))
 }
 
 fn build_event_mask(keyboard_enabled: bool, mouse_move_enabled: bool) -> CGEventMask {
