@@ -689,6 +689,9 @@ impl EventTap {
                     modifiers_from_flags_with_keys(state.current_flags, &state.pressed_keys),
                     key_code,
                 );
+                if native_mission_control_hotkey(&hotkey) {
+                    _ = self.events_tx.send(Event::MissionControlNativeEntered);
+                }
                 let bindings = self.hotkeys.load();
                 if let Some(commands) = bindings.get(&hotkey) {
                     for cmd in commands {
@@ -922,6 +925,12 @@ fn window_from_mouse_event(event: &CGEvent) -> Option<WindowServerId> {
         CGEvent::integer_value_field(Some(event), CGEventField::MouseEventWindowUnderMousePointer);
     let id = u32::try_from(field_value).ok()?;
     (id != 0).then(|| WindowServerId::new(id))
+}
+
+#[inline]
+fn native_mission_control_hotkey(hotkey: &Hotkey) -> bool {
+    hotkey.key_code == KeyCode::F3
+        || (hotkey.key_code == KeyCode::ArrowUp && hotkey.modifiers.intersects(Modifiers::CONTROL))
 }
 
 #[inline]
