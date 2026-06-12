@@ -42,6 +42,7 @@ pub enum WmEvent {
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
+    NativeMissionControlGestureBegan,
     ConfigUpdated(crate::common::config::Config),
     Command(WmCommand),
 }
@@ -193,6 +194,9 @@ impl WmController {
         }
 
         match event {
+            NativeMissionControlGestureBegan => {
+                self.events_tx.send(Event::MissionControlNativeEntered)
+            }
             SpaceStateUpdated(space_state, converter) => {
                 self.events_tx.send(Event::SpaceStateChanged(space_state.clone()));
                 _ = self.event_tap_tx.send(event_tap::Request::SpaceStateUpdated(
