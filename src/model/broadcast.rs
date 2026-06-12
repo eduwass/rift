@@ -49,6 +49,8 @@ pub enum BroadcastEvent {
         space_id: SpaceId,
         display_uuid: Option<String>,
     },
+    MissionControlNativeEntered,
+    MissionControlNativeExited,
 }
 
 pub type BroadcastSender = crate::actor::Sender<BroadcastEvent>;

@@ -1463,15 +1463,19 @@ impl Reactor {
                 return;
             }
             Event::MissionControlNativeEntered => {
-                return topology_workflow::handle_mission_control_native_entered(
+                let outcome = topology_workflow::handle_mission_control_native_entered(
                     &mut self.mission_control_manager,
                     &mut self.drag_manager,
-                );
+                )?;
+                self.broadcast_native_mission_control_entered();
+                return Ok(outcome);
             }
             Event::MissionControlNativeExited => {
-                return topology_workflow::handle_mission_control_native_exited(
+                let outcome = topology_workflow::handle_mission_control_native_exited(
                     &mut self.mission_control_manager,
-                );
+                )?;
+                self.broadcast_native_mission_control_exited();
+                return Ok(outcome);
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
                 return Ok(system_workflow::handle_raise_completed(
@@ -2367,6 +2371,20 @@ impl Reactor {
             };
             let _ = self.communication_manager.event_broadcaster.send(event);
         }
+    }
+
+    pub(crate) fn broadcast_native_mission_control_entered(&self) {
+        let _ = self
+            .communication_manager
+            .event_broadcaster
+            .send(BroadcastEvent::MissionControlNativeEntered);
+    }
+
+    pub(crate) fn broadcast_native_mission_control_exited(&self) {
+        let _ = self
+            .communication_manager
+            .event_broadcaster
+            .send(BroadcastEvent::MissionControlNativeExited);
     }
 
     fn maybe_reapply_app_rules_for_window(&mut self, window_id: WindowId) {
