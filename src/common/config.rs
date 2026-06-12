@@ -81,6 +81,11 @@ pub struct VirtualWorkspaceSettings {
     pub default_workspace: usize,
     #[serde(default)]
     pub reapply_app_rules_on_title_change: bool,
+    /// When true, windows float by default and an app_rule with `floating = false`
+    /// opts an app into tiling (whitelist mode). When false (default), windows tile
+    /// by default and an app_rule with `floating = true` floats an app (blacklist mode).
+    #[serde(default)]
+    pub default_floating: bool,
     #[serde(default)]
     pub app_rules: Vec<AppWorkspaceRule>,
     #[serde(default)]
@@ -155,6 +160,7 @@ impl Default for VirtualWorkspaceSettings {
             workspace_names: default_workspace_names(),
             default_workspace: 0,
             reapply_app_rules_on_title_change: false,
+            default_floating: false,
             app_rules: Vec::new(),
             workspace_rules: Vec::new(),
         }
@@ -366,6 +372,12 @@ pub struct Settings {
     /// 0 = raise immediately (legacy).
     #[serde(default = "default_ffm_dwell_ms")]
     pub focus_follows_mouse_dwell_ms: u64,
+    /// When true, focus-follows-mouse only acts on TILED windows — hovering a floating window
+    /// never focuses/raises it (floats are reached by click or alt-tab instead). This keeps FFM
+    /// calm under `default_floating` (whitelist) mode, where most windows float and overlap, so a
+    /// mouse sweep would otherwise focus-thrash through every stacked float it transits.
+    #[serde(default)]
+    pub focus_follows_mouse_tiled_only: bool,
     /// Hotkey that disables focus-follows-mouse while held.
     /// Accepts either a full hotkey (e.g. "Ctrl + A") or a modifier-only spec (e.g. "Ctrl")
     #[serde(default)]

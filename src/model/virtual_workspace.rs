@@ -147,6 +147,8 @@ pub struct WorkspaceStore {
     #[serde(skip)]
     test_app_rules: crate::model::AppRuleEngine,
     #[serde(skip)]
+    default_floating: bool,
+    #[serde(skip)]
     max_workspaces: usize,
     #[serde(skip)]
     default_workspace_count: usize,
@@ -188,6 +190,7 @@ impl WorkspaceStore {
             workspace_counter: 1,
             #[cfg(test)]
             test_app_rules: crate::model::AppRuleEngine::new(&config.app_rules),
+            default_floating: config.default_floating,
             max_workspaces,
             default_workspace_count: config.default_workspace_count,
             default_workspace_names: config.workspace_names.clone(),
@@ -204,6 +207,7 @@ impl WorkspaceStore {
         config: &VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
     ) {
+        self.default_floating = config.default_floating;
         self.workspace_rules = config.workspace_rules.clone();
         self.default_layout_mode = layout_settings.mode;
         self.layout_settings = layout_settings.clone();
@@ -910,6 +914,12 @@ impl WorkspaceStore {
         }
     }
 
+
+    /// Whether the app-rule / default_floating decision says this window should float.
+    pub fn window_rule_floating(&self, window_store: &WindowStore, window_id: WindowId) -> bool {
+        window_store.rule_floating(window_id)
+    }
+
     pub(crate) fn apply_app_rule_decision(
         &mut self,
         window_store: &mut WindowStore,
@@ -1029,20 +1039,28 @@ impl WorkspaceStore {
                 error!("Failed to preserve existing window workspace assignment");
                 return Err(WorkspaceError::AssignmentFailed);
             }
-            window_store.clear_rule_floating(window_id);
+            if self.default_floating {
+                window_store.set_rule_floating(window_id, true);
+            } else {
+                window_store.clear_rule_floating(window_id);
+            }
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: existing_assignment.workspace_id,
-                floating: false,
+                floating: self.default_floating,
                 prev_rule_decision,
             }));
         }
 
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(window_store, space, window_id, default_workspace_id) {
-            window_store.clear_rule_floating(window_id);
+            if self.default_floating {
+                window_store.set_rule_floating(window_id, true);
+            } else {
+                window_store.clear_rule_floating(window_id);
+            }
             Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: default_workspace_id,
-                floating: false,
+                floating: self.default_floating,
                 prev_rule_decision,
             }))
         } else {

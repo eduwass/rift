@@ -1110,9 +1110,15 @@ impl LayoutEngine {
                 },
             };
 
-        let should_be_floating = self.floating.is_floating(wid);
+        // Consult BOTH float sources: FloatingManager (layout truth) AND the model's app-rule /
+        // default_floating decision. A freshly-discovered window has its rule decision recorded in
+        // the model but not yet mirrored into FloatingManager, so without this it would be tiled
+        // even though it should float (the model-vs-layout desync bug under default_floating mode).
+        let should_be_floating = self.floating.is_floating(wid)
+            || window_store.rule_floating(wid);
 
         if should_be_floating {
+            self.floating.add_floating(wid);
             self.floating.add_active(space, wid.pid, wid);
         } else if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
             if !self.workspace_tree(assigned_workspace).contains_window(layout, wid) {
@@ -2592,12 +2598,18 @@ impl LayoutEngine {
             ax_role,
             ax_subrole,
         });
-        self.virtual_workspace_manager.apply_app_rule_decision(
+        let result = self.virtual_workspace_manager.apply_app_rule_decision(
             window_store,
             window_id,
             space,
             decision,
-        )
+        )?;
+        if let AppRuleResult::Managed(decision) = &result {
+            if decision.floating {
+                self.ensure_window_floating(space, window_id);
+            }
+        }
+        Ok(result)
     }
 
     pub fn ensure_active_workspace_info(
@@ -2830,6 +2842,16 @@ impl LayoutEngine {
         if self.focused_window == Some(from) {
             self.focused_window = Some(to);
         }
+    }
+
+    /// Force a window into the floating set AND out of every tiling tree. Idempotent. Used by the
+    /// window-discovery path so an app-rule / default_floating decision is honored even when the
+    /// window was already added to the tiling tree on creation (before the rule ran) — otherwise the
+    /// model says "floating" while the layout still tiles it (drag-across-displays glitch).
+    pub fn ensure_window_floating(&mut self, space: SpaceId, wid: WindowId) {
+        self.remove_window_from_all_tiling_trees(wid);
+        self.floating.add_floating(wid);
+        self.floating.add_active(space, wid.pid, wid);
     }
 
     fn update_active_floating_windows(&mut self, window_store: &WindowStore, space: SpaceId) {
