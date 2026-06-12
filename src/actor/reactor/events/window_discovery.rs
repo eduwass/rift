@@ -379,9 +379,15 @@ impl WindowDiscoveryHandler {
         assign_result: Result<AppRuleResult, WorkspaceError>,
     ) {
         match assign_result {
-            Ok(AppRuleResult::Managed(_)) => {
+            Ok(AppRuleResult::Managed(decision)) => {
                 if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
                     window.ignore_app_rule = false;
+                }
+                // Reconcile the layout with the float decision. Without this, a window that entered
+                // the tiling tree on creation (before the rule ran) stays tiled even though the model
+                // says floating — the source of the "rift is tiling my floating window" bug.
+                if decision.floating {
+                    reactor.layout_manager.layout_engine.ensure_window_floating(space, wid);
                 }
             }
             Ok(AppRuleResult::Unmanaged) => {

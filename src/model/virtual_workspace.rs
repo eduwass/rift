@@ -189,6 +189,8 @@ pub struct VirtualWorkspaceManager {
     #[serde(skip)]
     app_rules: Vec<AppWorkspaceRule>,
     #[serde(skip)]
+    default_floating: bool,
+    #[serde(skip)]
     app_rule_regex_cache: Vec<Option<regex::Regex>>,
     #[serde(skip)]
     max_workspaces: usize,
@@ -246,6 +248,7 @@ impl VirtualWorkspaceManager {
             floating_positions: HashMap::default(),
             workspace_counter: 1,
             app_rules: config.app_rules.clone(),
+            default_floating: config.default_floating,
             app_rule_regex_cache: Vec::new(),
             max_workspaces,
             default_workspace_count: config.default_workspace_count,
@@ -267,6 +270,7 @@ impl VirtualWorkspaceManager {
         layout_settings: &LayoutSettings,
     ) {
         self.app_rules = config.app_rules.clone();
+        self.default_floating = config.default_floating;
         self.workspace_rules = config.workspace_rules.clone();
         self.default_layout_mode = layout_settings.mode;
         self.layout_settings = layout_settings.clone();
@@ -1287,6 +1291,13 @@ impl VirtualWorkspaceManager {
         }
     }
 
+    /// Whether the app-rule / default_floating decision says this window should float.
+    /// This is the model's record of the float decision; the layout engine consults it when
+    /// adding a window so a freshly-discovered window isn't tiled before FloatingManager is synced.
+    pub fn window_rule_floating(&self, space: SpaceId, window_id: WindowId) -> bool {
+        self.window_rule_floating.get(&(space, window_id)).copied().unwrap_or(false)
+    }
+
     pub fn assign_window_with_app_info(
         &mut self,
         window_id: WindowId,
@@ -1407,21 +1418,31 @@ impl VirtualWorkspaceManager {
             }
         }
 
+        // No app rule matched. Baseline float state comes from `default_floating`:
+        // false = tile by default (blacklist mode), true = float by default (whitelist mode).
         if let Some(existing_ws) = existing_assignment {
-            self.window_rule_floating.remove(&(space, window_id));
+            if self.default_floating {
+                self.window_rule_floating.insert((space, window_id), true);
+            } else {
+                self.window_rule_floating.remove(&(space, window_id));
+            }
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: existing_ws,
-                floating: false,
+                floating: self.default_floating,
                 prev_rule_decision,
             }));
         }
 
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
-            self.window_rule_floating.remove(&(space, window_id));
+            if self.default_floating {
+                self.window_rule_floating.insert((space, window_id), true);
+            } else {
+                self.window_rule_floating.remove(&(space, window_id));
+            }
             Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: default_workspace_id,
-                floating: false,
+                floating: self.default_floating,
                 prev_rule_decision,
             }))
         } else {

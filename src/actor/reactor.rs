@@ -2031,6 +2031,15 @@ impl Reactor {
             return false;
         }
 
+        // Float-aware FFM: when enabled, hovering a floating window never focuses/raises it.
+        // Floats are reached by click or alt-tab; this stops mouse sweeps from focus-thrashing
+        // through overlapping floats under default_floating (whitelist) mode.
+        if self.config.settings.focus_follows_mouse_tiled_only
+            && self.layout_manager.layout_engine.is_window_floating(wid)
+        {
+            return false;
+        }
+
         if !window.matches_filter(WindowFilter::EffectivelyManageable)
             && !self.layout_manager.layout_engine.is_window_floating(wid)
         {
