@@ -1579,6 +1579,20 @@ impl Reactor {
         let _ = self.communication_manager.event_broadcaster.send(event);
     }
 
+    pub(crate) fn broadcast_native_mission_control_entered(&self) {
+        let _ = self
+            .communication_manager
+            .event_broadcaster
+            .send(BroadcastEvent::MissionControlNativeEntered);
+    }
+
+    pub(crate) fn broadcast_native_mission_control_exited(&self) {
+        let _ = self
+            .communication_manager
+            .event_broadcaster
+            .send(BroadcastEvent::MissionControlNativeExited);
+    }
+
     fn maybe_reapply_app_rules_for_window(&mut self, window_id: WindowId) {
         if !self.config.virtual_workspaces.reapply_app_rules_on_title_change {
             return;

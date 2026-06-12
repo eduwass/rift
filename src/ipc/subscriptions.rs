@@ -188,6 +188,8 @@ impl ServerState {
             BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
             BroadcastEvent::StacksChanged { .. } => "stacks_changed",
             BroadcastEvent::WindowFocused { .. } => "window_focused",
+            BroadcastEvent::MissionControlNativeEntered => "mission_control_native_entered",
+            BroadcastEvent::MissionControlNativeExited => "mission_control_native_exited",
         };
 
         let mut targets: HashSet<ClientPort> = HashSet::default();
@@ -237,6 +239,8 @@ impl ServerState {
             BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
             BroadcastEvent::StacksChanged { .. } => "stacks_changed",
             BroadcastEvent::WindowFocused { .. } => "window_focused",
+            BroadcastEvent::MissionControlNativeEntered => "mission_control_native_entered",
+            BroadcastEvent::MissionControlNativeExited => "mission_control_native_exited",
         };
 
         // Collect relevant subscriptions without full HashMap clone

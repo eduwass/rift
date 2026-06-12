@@ -418,12 +418,14 @@ impl SpaceEventHandler {
 
     pub fn handle_mission_control_native_entered(reactor: &mut Reactor) {
         reactor.set_mission_control_active(true);
+        reactor.broadcast_native_mission_control_entered();
     }
 
     pub fn handle_mission_control_native_exited(reactor: &mut Reactor) {
         if reactor.is_mission_control_active() {
             reactor.set_mission_control_active(false);
         }
+        reactor.broadcast_native_mission_control_exited();
         reactor.repair_spaces_after_mission_control();
         reactor.refresh_windows_after_mission_control();
     }

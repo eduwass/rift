@@ -142,6 +142,12 @@ impl CliExecutor for DefaultCliExecutor {
                     env_vars.insert("RIFT_DISPLAY_UUID".into(), display_uuid.clone());
                 }
             }
+            BroadcastEvent::MissionControlNativeEntered => {
+                env_vars.insert("RIFT_EVENT_TYPE".into(), "mission_control_native_entered".into());
+            }
+            BroadcastEvent::MissionControlNativeExited => {
+                env_vars.insert("RIFT_EVENT_TYPE".into(), "mission_control_native_exited".into());
+            }
         }
 
         let event_json = match serde_json::to_string(event) {
