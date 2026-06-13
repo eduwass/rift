@@ -124,6 +124,11 @@ struct State {
     layout_mode_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
     last_mouse_move_loc: Option<CGPoint>,
     last_mouse_move_timestamp: u64,
+    /// Consecutive watchdog ticks observed with mouse-move handling wrongly
+    /// suppressed (event processing off, or ffm config-on but runtime-disabled).
+    /// Drives the watchdog self-heal that recovers a leaked menu/mission-control
+    /// disable without a restart. Reset to 0 whenever handling is healthy.
+    mouse_handling_stuck_ticks: u32,
 }
 
 impl Default for State {
@@ -149,6 +154,7 @@ impl Default for State {
             layout_mode_by_space: HashMap::default(),
             last_mouse_move_loc: None,
             last_mouse_move_timestamp: 0,
+            mouse_handling_stuck_ticks: 0,
         }
     }
 }
@@ -354,8 +360,46 @@ impl EventTap {
                         pressed_keys = state.pressed_keys.len(),
                         disable_hotkey_active = state.disable_hotkey_active,
                         event_processing = state.event_processing_enabled,
+                        ffm_runtime_enabled = state.focus_follows_mouse_enabled,
                         "watchdog tick"
                     );
+
+                    // Self-heal a leaked mouse-handling disable. Mouse-move handling is
+                    // suppressed (mask rebuilt without MouseMoved) when event processing is
+                    // off, or when ffm is config-on but runtime-disabled by a transient
+                    // menu-open / mission-control state. If the reactor misses the matching
+                    // "menu closed / MC exited" notification, that disable never clears and
+                    // ffm stays dead until a manual restart (cursor still warps via the
+                    // external focus daemon, but focus never follows). Both disables are only
+                    // ever meant to be brief (~600 ms startup window; a menu/MC interaction),
+                    // so if either is still asserted across several 5 s ticks, force handling
+                    // back on. Harmless if the disable was legitimate and still active: the
+                    // reactor's own menu-open / MC guards in should_raise_on_mouse_over still
+                    // suppress raises, and the next genuine state change re-issues the request.
+                    let ffm_stuck = state.focus_follows_mouse_config_enabled
+                        && !state.focus_follows_mouse_enabled;
+                    let processing_stuck = !state.event_processing_enabled;
+                    if ffm_stuck || processing_stuck {
+                        state.mouse_handling_stuck_ticks =
+                            state.mouse_handling_stuck_ticks.saturating_add(1);
+                    } else {
+                        state.mouse_handling_stuck_ticks = 0;
+                    }
+                    // 3 ticks ≈ 15 s — long enough to never fight the 600 ms startup window
+                    // or a normal menu/MC interaction, short enough to recover promptly.
+                    if state.mouse_handling_stuck_ticks >= 3 {
+                        warn!(
+                            event_processing = state.event_processing_enabled,
+                            ffm_runtime_enabled = state.focus_follows_mouse_enabled,
+                            "mouse handling stuck disabled across watchdog ticks; self-healing"
+                        );
+                        state.event_processing_enabled = true;
+                        state.focus_follows_mouse_enabled = true;
+                        state.mouse_handling_stuck_ticks = 0;
+                        state.reset(true);
+                        drop(state);
+                        this.rebuild_event_tap_mask_if_needed();
+                    }
                 }
             }
         }
