@@ -494,7 +494,6 @@ impl CommandEventHandler {
             return;
         }
 
-        let mut target_frame = window_frame;
         let size = window_frame.size;
         let dest_rect = target_screen.frame;
         let mut origin = dest_rect.mid();
@@ -504,20 +503,25 @@ impl CommandEventHandler {
         let max = dest_rect.max();
         origin.x = origin.x.max(min.x).min(max.x - size.width);
         origin.y = origin.y.max(min.y).min(max.y - size.height);
+        let mut target_frame = window_frame;
         target_frame.origin = origin;
 
-        if let Some(app) = reactor.app_manager.apps.get(&window_id.pid) {
-            if let Some(wsid) = window_server_id {
-                let txid = reactor.transaction_manager.generate_next_txid(wsid);
-                reactor.transaction_manager.set_last_sent_txid(wsid, txid);
-                let _ = app.handle.send(crate::actor::app::Request::SetWindowFrame(
-                    window_id,
-                    target_frame,
-                    txid,
-                    true,
-                ));
-            } else {
-                let txid = TransactionId::default();
+        // Tiled windows get their real frame from the layout pass below, so seeding a centered
+        // frame here just makes them visibly jump (centre -> tile slot), which is most of the
+        // flicker on rapid cross-display moves. Only seed floating windows, which the layout pass
+        // won't reposition; the layout pass places tiled windows directly on the target display in
+        // a single SetWindowFrame.
+        let is_floating = reactor.layout_manager.layout_engine.is_window_floating(window_id);
+        if is_floating {
+            if let Some(app) = reactor.app_manager.apps.get(&window_id.pid) {
+                let txid = match window_server_id {
+                    Some(wsid) => {
+                        let txid = reactor.transaction_manager.generate_next_txid(wsid);
+                        reactor.transaction_manager.set_last_sent_txid(wsid, txid);
+                        txid
+                    }
+                    None => TransactionId::default(),
+                };
                 let _ = app.handle.send(crate::actor::app::Request::SetWindowFrame(
                     window_id,
                     target_frame,
@@ -525,10 +529,9 @@ impl CommandEventHandler {
                     true,
                 ));
             }
-        }
-
-        if let Some(state) = reactor.window_manager.windows.get_mut(&window_id) {
-            state.frame_monotonic = target_frame;
+            if let Some(state) = reactor.window_manager.windows.get_mut(&window_id) {
+                state.frame_monotonic = target_frame;
+            }
         }
 
         let response = reactor.layout_manager.layout_engine.move_window_to_space(
@@ -561,13 +564,15 @@ impl CommandEventHandler {
             warn!("Failed to send raise request after display move: {}", e);
         }
 
-        // Defer the cursor warp until the window has physically re-tiled at its destination. The
+        // Defer the cursor warp until the window has physically landed on the target display. The
         // window move is async (SetWindowFrame + a follow-up layout pass), so warping now would
-        // land on a neighbour on the target display and focus-follows-mouse would steal focus from
-        // the window we just moved. `finalize_event_processing` performs the warp once the window
-        // settles. `target_frame` is the centered frame we seeded above, used to detect settling.
+        // land on a neighbour on the source display and focus-follows-mouse would steal focus from
+        // the window we just moved. `finalize_event_processing` fires the warp once the window's
+        // centre is inside `dest_rect`. Storing the destination display rect (not a seeded frame)
+        // keeps this robust under rapid moves: a newer move overwrites the target, and the warp
+        // simply fires when the window reaches whichever display is current — never mid-transition.
         reactor.pending_display_move_warp =
-            Some((window_id, target_frame, std::time::Instant::now() + std::time::Duration::from_millis(600)));
+            Some((window_id, dest_rect, std::time::Instant::now() + std::time::Duration::from_millis(600)));
 
         poke_border_for_window(window_server_id);
     }

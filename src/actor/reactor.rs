@@ -268,9 +268,9 @@ pub struct Reactor {
     active_spaces: HashSet<SpaceId>,
     display_topology_manager: DisplayTopologyManager,
     // After move-window-to-display, the cursor warp must wait until the window has physically
-    // re-tiled at its destination; warping immediately lands on a neighbour (because the move is
-    // async) and focus-follows-mouse then steals focus. Holds (window, the centered frame we
-    // seeded, deadline) until the window settles or the deadline passes.
+    // landed on its destination; warping immediately lands on a neighbour (because the move is
+    // async) and focus-follows-mouse then steals focus. Holds (window, destination display rect,
+    // deadline) and fires once the window's centre is inside that rect or the deadline passes.
     pending_display_move_warp: Option<(WindowId, CGRect, std::time::Instant)>,
     // Last (window, frame) we broadcast as WindowFocused. ~5 reactor sites (hover, raise, init,
     // finalize, observed) can fire for one focus change, flooding subscribers with identical events
@@ -1210,15 +1210,9 @@ impl Reactor {
         // has actually re-tiled away from the centered frame we seeded (so the cursor lands on the
         // window, not a neighbour that would steal focus-follows-mouse), or once a short deadline
         // passes as a safety net.
-        if let Some((wid, seeded_frame, deadline)) = self.pending_display_move_warp {
+        if let Some((wid, dest_rect, deadline)) = self.pending_display_move_warp {
             let settled = match self.window_manager.windows.get(&wid) {
-                Some(window) => {
-                    let f = window.frame_monotonic;
-                    (f.origin.x - seeded_frame.origin.x).abs() > 2.0
-                        || (f.origin.y - seeded_frame.origin.y).abs() > 2.0
-                        || (f.size.width - seeded_frame.size.width).abs() > 2.0
-                        || (f.size.height - seeded_frame.size.height).abs() > 2.0
-                }
+                Some(window) => dest_rect.contains(window.frame_monotonic.mid()),
                 None => true,
             };
             if settled || std::time::Instant::now() >= deadline {
