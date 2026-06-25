@@ -313,7 +313,10 @@ pub struct Reactor {
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     pub animation_tx: Option<AnimationSender>,
-    // After move-window-to-display, defer cursor warp until the window re-tiles.
+    // After move-window-to-display, the cursor warp must wait until the window has physically
+    // landed on its destination; warping immediately lands on a neighbour (because the move is
+    // async) and focus-follows-mouse then steals focus. Holds (window, destination display rect,
+    // deadline) and fires once the window's centre is inside that rect or the deadline passes.
     pending_display_move_warp: Option<(WindowId, CGRect, std::time::Instant)>,
 }
 
@@ -2031,16 +2034,12 @@ impl Reactor {
             self.workspace_switch_manager.pending_workspace_mouse_warp = None;
         }
 
-        // Deferred cursor warp for a completed move-window-to-display.
-        if let Some((wid, seeded_frame, deadline)) = self.pending_display_move_warp {
+        // Deferred cursor warp for a completed move-window-to-display. Fire once the moved window
+        // has landed on the target display (centre inside `dest_rect`), or once a short deadline
+        // passes as a safety net.
+        if let Some((wid, dest_rect, deadline)) = self.pending_display_move_warp {
             let settled = match self.state.windows.window(wid) {
-                Some(window) => {
-                    let f = window.frame_monotonic;
-                    (f.origin.x - seeded_frame.origin.x).abs() > 2.0
-                        || (f.origin.y - seeded_frame.origin.y).abs() > 2.0
-                        || (f.size.width - seeded_frame.size.width).abs() > 2.0
-                        || (f.size.height - seeded_frame.size.height).abs() > 2.0
-                }
+                Some(window) => dest_rect.contains(window.frame_monotonic.mid()),
                 None => true,
             };
             if settled || std::time::Instant::now() >= deadline {

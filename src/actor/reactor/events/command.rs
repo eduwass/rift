@@ -354,9 +354,7 @@ pub fn handle_command_reactor_move_window_to_display(
     apps: &AppManager,
     payload: MoveWindowToDisplayPayload,
 ) -> anyhow::Result<EventOutcome> {
-    if let Some(window) = state.windows.window_mut(payload.window) {
-        window.frame_monotonic = payload.target_frame;
-    } else {
+    if state.windows.window(payload.window).is_none() {
         warn!(window = ?payload.window, "Move window to display ignored: unknown window");
         return Ok(EventOutcome::finalized_event(None, false, false, false));
     }
@@ -384,16 +382,16 @@ pub fn handle_command_reactor_move_window_to_display(
     poke_border_for_window(payload.window_server_id);
 
     // Raise so the moved window stays key/focused on the target display; defer the
-    // cursor warp (via EventOutcome::pending_display_move_warp applied by Reactor)
-    // until the window has physically re-tiled — an immediate warp would let FFM
-    // steal focus to an overlapping neighbour mid-relayout.
+    // cursor warp until the window has physically landed on the target display. An
+    // immediate warp would let FFM steal focus to an overlapping neighbour mid-relayout.
+    // Tiled windows get their real frame from the layout pass, so only seed floating
+    // windows (which the layout pass won't reposition).
     let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
     if let Some(app) = apps.apps.get(&payload.window.pid) {
         app_handles.insert(payload.window.pid, app.handle.clone());
     }
-    Ok(EventOutcome::finalized_event(None, false, false, false)
+    let mut outcome = EventOutcome::finalized_event(None, false, false, false)
         .with_layout_response(response, None)
-        .with_pre_layout_window_frame_write(payload.window, payload.target_frame, true)
         .with_layout_event(LayoutEvent::WindowFocused(payload.target_space, payload.window))
         .with_raise_request(raise_manager::Event::RaiseRequest(raise_manager::RaiseRequest {
             raise_windows: Vec::new(),
@@ -403,7 +401,15 @@ pub fn handle_command_reactor_move_window_to_display(
         }))
         .with_pending_display_move_warp(
             payload.window,
-            payload.target_frame,
+            payload.target_screen,
             std::time::Duration::from_millis(600),
-        ))
+        );
+    if layout.layout_engine.is_window_floating(payload.window) {
+        outcome = outcome.with_pre_layout_window_frame_write(
+            payload.window,
+            payload.target_frame,
+            true,
+        );
+    }
+    Ok(outcome)
 }
