@@ -4549,9 +4549,14 @@ impl Reactor {
                 }
             };
 
+            // Prefer screens that overlap on the orthogonal axis (i.e. are on the
+            // same row for left/right, or same column for up/down) before ranking
+            // by distance in the requested direction. Ranking by distance first
+            // lets a screen on a *different* row win just because its edge happens
+            // to be closer — e.g. an ultrawide spanning the top would steal a
+            // "right" move from a bottom-row neighbour.
             let should_replace = best.as_ref().map_or(true, |(best_primary, best_orth, _)| {
-                primary_dist < *best_primary
-                    || (primary_dist == *best_primary && orth_gap < *best_orth)
+                orth_gap < *best_orth || (orth_gap == *best_orth && primary_dist < *best_primary)
             });
 
             if should_replace {
