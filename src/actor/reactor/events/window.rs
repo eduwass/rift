@@ -249,35 +249,58 @@ impl WindowEventHandler {
             }
 
             if triggered_by_rift {
-                let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
-                    return false;
-                };
+                // Did rift's own move just SETTLE this window at its final frame (vs an intermediate
+                // frame mid-apply)? Tracked so we can re-broadcast below once placement is done.
+                let settled;
+                {
+                    let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
+                        return false;
+                    };
 
-                if let Some((wsid, target)) = pending_target {
-                    if new_frame.same_as(target) {
-                        if !window.frame_monotonic.same_as(new_frame) {
-                            debug!(?wid, ?new_frame, "Final frame matches Rift request");
-                            window.frame_monotonic = new_frame;
+                    if let Some((wsid, target)) = pending_target {
+                        if new_frame.same_as(target) {
+                            if !window.frame_monotonic.same_as(new_frame) {
+                                debug!(?wid, ?new_frame, "Final frame matches Rift request");
+                                window.frame_monotonic = new_frame;
+                            }
+                            reactor.transaction_manager.clear_target_for_window(wsid);
+                            settled = true;
+                        } else {
+                            trace!(
+                                ?wid,
+                                ?new_frame,
+                                ?target,
+                                "Skipping intermediate frame from Rift request"
+                            );
+                            settled = false;
                         }
-                        reactor.transaction_manager.clear_target_for_window(wsid);
-                    } else {
-                        trace!(
+                    } else if !window.frame_monotonic.same_as(new_frame) {
+                        debug!(
                             ?wid,
                             ?new_frame,
-                            ?target,
-                            "Skipping intermediate frame from Rift request"
+                            "Rift frame event missing tx record; updating state"
                         );
+                        window.frame_monotonic = new_frame;
+                        if let Some(wsid) = window.info.sys_id {
+                            reactor.transaction_manager.clear_target_for_window(wsid);
+                        }
+                        settled = true;
+                    } else {
+                        settled = false;
                     }
-                } else if !window.frame_monotonic.same_as(new_frame) {
-                    debug!(
-                        ?wid,
-                        ?new_frame,
-                        "Rift frame event missing tx record; updating state"
-                    );
-                    window.frame_monotonic = new_frame;
-                    if let Some(wsid) = window.info.sys_id {
-                        reactor.transaction_manager.clear_target_for_window(wsid);
-                    }
+                }
+
+                // rift just finished placing this window (re-tile, new-window open, fullscreen, gap
+                // toggle, move-node, …). Unlike an observed app/drag change, this path returns without
+                // re-broadcasting, so the event-driven focus border would stay on the pre-move frame
+                // until the next focus change. Re-broadcast for the focused window so the border tracks
+                // every rift-driven move — one place that covers all these cases (mirrors the
+                // drag-follow re-broadcast below).
+                if settled
+                    && reactor.main_window() == Some(wid)
+                    && let Some(space) = reactor.best_space_for_window(&new_frame, server_id)
+                {
+                    reactor.broadcast_window_focused(wid, space);
                 }
 
                 return false;
