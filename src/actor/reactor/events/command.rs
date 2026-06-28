@@ -1,11 +1,14 @@
+use dispatchr::queue;
+use dispatchr::time::Time;
 use tracing::{error, info, warn};
 
 use super::super::ScreenInfo;
 use crate::actor::app::{AppThreadHandle, Quiet, WindowId};
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{
-    Command, DisplaySelector, Reactor, ReactorCommand, WorkspaceSwitchOrigin,
+    Command, DisplaySelector, Event, Reactor, ReactorCommand, WorkspaceSwitchOrigin,
 };
+use crate::sys::dispatch::DispatchExt;
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{menu_bar, raise_manager};
@@ -575,6 +578,63 @@ impl CommandEventHandler {
             Some((window_id, dest_rect, std::time::Instant::now() + std::time::Duration::from_millis(600)));
 
         poke_border_for_window(window_server_id);
+
+        // A cross-display move's single SetWindowFrame can be CLAMPED by macOS to the source
+        // display at apply-time (width = source.max_x - new_origin_x), leaving a tiled window stuck
+        // narrow on the new display while rift's optimistic frame_monotonic still reads the
+        // requested full frame — so every later re-tile is a dedup no-op. The clamp only resolves
+        // once the window is adopted by the target display, and that adoption can arrive via an SLS
+        // update that fires no WindowFrameChanged, so there is no event to react to. Schedule a
+        // one-shot re-assert that fires after the window has certainly landed and forces a
+        // corrective re-tile. Tiled windows only — floating windows keep their stored position.
+        // Fire several re-asserts rather than one: a single shot races window adoption — too early
+        // and the re-tile is itself clamped with no retry; too late and you have already moved
+        // focus/window again. The re-assert is idempotent (once the window sits at its true frame,
+        // each extra re-tile is a no-op), so a few cheap shots robustly cover the race. Each
+        // captures the moved `window_id`, so it re-asserts the right window even if focus moved.
+        if !is_floating
+            && let Some(events_tx) = reactor.communication_manager.events_tx.clone()
+        {
+            for delay_ms in [200i64, 450, 800] {
+                let events_tx = events_tx.clone();
+                queue::main().after_f_s(
+                    Time::new_after(Time::NOW, delay_ms * 1_000_000),
+                    (events_tx, window_id),
+                    |(events_tx, window_id)| {
+                        events_tx.send(Event::ReassertDisplayMove(window_id));
+                    },
+                );
+            }
+        }
+    }
+
+    /// Force a corrective re-tile after a cross-display move (see `Event::ReassertDisplayMove`).
+    ///
+    /// macOS may have clamped the move's frame, leaving `frame_monotonic` optimistically reading
+    /// the requested (never-applied) frame so the dedup skips every later re-tile. To bust that
+    /// dedup we seed `frame_monotonic` with the window's REAL on-screen frame (from the window
+    /// server): if it was clamped, the real frame differs from the tile target, so the layout pass
+    /// re-sends the true frame and it sticks now that the window lives on the target display; if it
+    /// is already correct, the layout pass dedups to a no-op — nothing visibly moves.
+    ///
+    /// NEVER seed a zero/sentinel frame here: it can leak out as a momentary 0-width collapse
+    /// (visible flicker), especially when this fires several times per move.
+    pub fn handle_reassert_display_move(reactor: &mut Reactor, window_id: WindowId) {
+        let wsid = match reactor.window_manager.windows.get(&window_id) {
+            Some(window) => window.info.sys_id,
+            None => return,
+        };
+        let Some(wsid) = wsid else { return };
+
+        let real_frame =
+            reactor.window_server_info_manager.window_server_info.get(&wsid).map(|info| info.frame);
+        if let Some(real_frame) = real_frame
+            && let Some(window) = reactor.window_manager.windows.get_mut(&window_id)
+        {
+            window.frame_monotonic = real_frame;
+        }
+        reactor.transaction_manager.clear_target_for_window(wsid);
+        let _ = reactor.update_layout_or_warn(false, false);
     }
 
     pub fn handle_command_reactor_close_window(

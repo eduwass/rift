@@ -2955,6 +2955,52 @@ mod tests {
     }
 
     #[test]
+    fn surviving_window_refills_after_sibling_removed() {
+        // Regression: closing one of two tiled windows must reflow the survivor to the full tiling
+        // area. A stuck-narrow survivor (an empty gap where the closed window was) means the
+        // removal did not renormalize the tree. This pins the tree-level reflow; the apply layer
+        // (dedup / optimistic frame) is covered separately.
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let constraints = HashMap::default();
+        let frames = |sys: &TraditionalLayoutSystem| -> HashMap<WindowId, CGRect> {
+            sys.calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect()
+        };
+
+        let split = frames(&system);
+        let w1_split = split.get(&w(1)).copied().expect("w1 frame while split");
+        assert!(
+            w1_split.size.width < 600.0,
+            "two tiled windows should each get ~half, got {w1_split:?}"
+        );
+
+        system.remove_window(w(2));
+        let full = frames(&system);
+        let w1_full = full.get(&w(1)).copied().expect("w1 frame after sibling removed");
+        assert!(
+            w1_full.size.width >= 990.0,
+            "survivor must refill the full tiling width after its sibling is closed, got {w1_full:?}"
+        );
+    }
+
+    #[test]
     fn window_in_direction_prefers_top_for_down_direction_after_orientation_toggle() {
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();

@@ -188,6 +188,15 @@ pub enum Event {
     ),
     WindowTitleChanged(WindowId, String),
     ResyncAppForWindow(WindowServerId),
+    /// Re-assert a window's tile frame a short time after a cross-display move.
+    ///
+    /// macOS can CLAMP the move's SetWindowFrame to the source display at apply-time (the window
+    /// can't exceed `source.max_x - new_origin_x` until it has been adopted by the target display),
+    /// leaving it stuck narrow while rift's optimistic `frame_monotonic` still reads the requested
+    /// full frame — so every later re-tile is a dedup no-op. This event is scheduled (via a GCD
+    /// `after`) by the move handler and fires once the window has certainly landed on the target
+    /// display, where a forced re-tile is no longer clamped and sticks.
+    ReassertDisplayMove(WindowId),
     MenuOpened(pid_t),
     MenuClosed(pid_t),
 
@@ -1117,6 +1126,9 @@ impl Reactor {
             }
             Event::Command(cmd) => {
                 CommandEventHandler::handle_command(self, cmd);
+            }
+            Event::ReassertDisplayMove(window_id) => {
+                CommandEventHandler::handle_reassert_display_move(self, window_id);
             }
             _ => (),
         }
