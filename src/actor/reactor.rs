@@ -67,6 +67,8 @@ mod tests;
 use std::thread;
 
 use animation::Sender as AnimationSender;
+use dispatchr::queue;
+use dispatchr::time::Time;
 use events::{
     EventOutcome, app as application_workflow, command as command_workflow,
     drag as interaction_workflow, focus as focus_service, space as topology_workflow,
@@ -92,6 +94,7 @@ use crate::common::config::Config;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
 use crate::model::RiftState;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
+use crate::sys::dispatch::DispatchExt;
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::virtual_workspace::AppRuleResult;
@@ -222,6 +225,15 @@ pub enum Event {
         Option<MouseState>,
     ),
     WindowTitleChanged(WindowId, String),
+    /// Re-assert a window's tile frame a short time after a cross-display move.
+    ///
+    /// macOS can CLAMP the move's SetWindowFrame to the source display at apply-time (the window
+    /// can't exceed `source.max_x - new_origin_x` until it has been adopted by the target display),
+    /// leaving it stuck narrow while rift's optimistic `frame_monotonic` still reads the requested
+    /// full frame — so every later re-tile is a dedup no-op. This event is scheduled (via a GCD
+    /// `after`) by the move handler and fires once the window has certainly landed on the target
+    /// display, where a forced re-tile is no longer clamped and sticks.
+    ReassertDisplayMove(WindowId),
     MenuOpened(pid_t),
     MenuClosed(pid_t),
 
@@ -1746,6 +1758,19 @@ impl Reactor {
                         target_screen: target_screen.frame,
                         target_frame,
                     },
+                )
+                .map(|outcome| {
+                    if !self.layout_manager.layout_engine.is_window_floating(window) {
+                        self.schedule_display_move_reasserts(window);
+                    }
+                    outcome
+                });
+            }
+            Event::ReassertDisplayMove(window_id) => {
+                return command_workflow::handle_reassert_display_move(
+                    &mut self.state,
+                    &self.transaction_manager,
+                    window_id,
                 );
             }
             _ => (),
@@ -3161,6 +3186,22 @@ impl Reactor {
     fn window_center_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {
         let window_center = self.state.windows.window(wid)?.frame_monotonic.mid();
         self.screen_for_point(window_center).map(|_| window_center)
+    }
+
+    fn schedule_display_move_reasserts(&self, window_id: WindowId) {
+        let Some(events_tx) = self.communication_manager.events_tx.clone() else {
+            return;
+        };
+        for delay_ms in [200i64, 450, 800] {
+            let events_tx = events_tx.clone();
+            queue::main().after_f_s(
+                Time::new_after(Time::NOW, delay_ms * 1_000_000),
+                (events_tx, window_id),
+                |(events_tx, window_id)| {
+                    events_tx.send(Event::ReassertDisplayMove(window_id));
+                },
+            );
+        }
     }
 
     pub fn warp_mouse(&mut self, point: CGPoint) {

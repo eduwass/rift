@@ -413,3 +413,25 @@ pub fn handle_command_reactor_move_window_to_display(
     }
     Ok(outcome)
 }
+
+/// Force a corrective re-tile after a cross-display move (see `Event::ReassertDisplayMove`).
+pub fn handle_reassert_display_move(
+    state: &mut RiftState,
+    transactions: &crate::actor::reactor::transaction_manager::TransactionManager,
+    window_id: WindowId,
+) -> anyhow::Result<EventOutcome> {
+    let Some(window) = state.windows.window(window_id) else {
+        return Ok(EventOutcome::finalized_event(None, false, false, false));
+    };
+    let Some(wsid) = window.info.sys_id else {
+        return Ok(EventOutcome::finalized_event(None, false, false, false));
+    };
+
+    if let Some(real_frame) = state.windows.get_window_server_info(wsid).map(|info| info.frame)
+        && let Some(window) = state.windows.window_mut(window_id)
+    {
+        window.frame_monotonic = real_frame;
+    }
+    transactions.clear_target_for_window(wsid);
+    Ok(EventOutcome::finalized_event(None, false, false, false).with_arrange_passes(1))
+}
