@@ -197,6 +197,10 @@ pub enum Event {
     /// `after`) by the move handler and fires once the window has certainly landed on the target
     /// display, where a forced re-tile is no longer clamped and sticks.
     ReassertDisplayMove(WindowId),
+
+    /// Periodic tick: reclaim space from windows that closed without notifying rift
+    /// (see [`Reactor::reconcile_orphan_windows`]).
+    ReconcileOrphans,
     MenuOpened(pid_t),
     MenuClosed(pid_t),
 
@@ -569,6 +573,69 @@ impl Reactor {
         self.update_complete_window_server_info(ws_info);
     }
 
+    /// Re-query an app's visible windows so the stale-window reconciliation in
+    /// `WindowsDiscovered` can reap any window AX/the window server no longer reports.
+    /// Called from the focus/main-window-change paths for a fast reap in the common
+    /// case; the periodic sweep in [`Self::reconcile_orphan_windows`] is the guaranteed
+    /// backstop for apps that emit no event at all on close (e.g. Slack).
+    fn schedule_orphan_reconcile(&mut self, pid: pid_t) {
+        if let Some(app) = self.app_manager.apps.get(&pid) {
+            let _ = app.handle.send(Request::GetVisibleWindows);
+        }
+    }
+
+    /// Reliably reclaim space left by windows that closed without telling rift.
+    ///
+    /// Some apps — notably Electron ones (Slack, ChatGPT, …) — order a window out on
+    /// close instead of destroying it, stay alive, and emit no destroy/focus/main-window
+    /// notification at all, so no event-driven path fires. Run on a timer: any window rift
+    /// still tiles on the active workspace that is no longer on screen is an orphan.
+    /// Re-query just those apps so the existing `WindowsDiscovered` reconciliation reaps
+    /// them. Scoped to the active workspace so windows parked on inactive workspaces
+    /// (legitimately off screen) never trigger work.
+    fn reconcile_orphan_windows(&mut self) {
+        if self.is_mission_control_active() || self.is_in_drag() {
+            return;
+        }
+        let on_screen: HashSet<WindowServerId> =
+            window_server::get_visible_windows_with_layer(None).into_iter().map(|i| i.id).collect();
+        let mut pids: HashSet<pid_t> = HashSet::default();
+        for space in self.active_spaces.clone() {
+            for wid in self.layout_manager.layout_engine.windows_in_active_workspace(space) {
+                if self.layout_manager.layout_engine.is_window_floating(wid) {
+                    continue;
+                }
+                let Some(state) = self.window_manager.windows.get(&wid) else {
+                    continue;
+                };
+                if state.info.is_minimized {
+                    continue;
+                }
+                if let Some(ws_id) = state.info.sys_id
+                    && !on_screen.contains(&ws_id)
+                {
+                    pids.insert(wid.pid);
+                }
+            }
+        }
+        for pid in pids {
+            if let Some(app) = self.app_manager.apps.get(&pid) {
+                let _ = app.handle.send(Request::GetVisibleWindows);
+            }
+        }
+    }
+
+    /// Rebuild only the on-screen window-server id set from live state, without touching
+    /// cached frames/info. Apps that order a window out on close without emitting a
+    /// destroy notification (Electron: Slack, ChatGPT, …) otherwise leave a stale id in
+    /// `visible_windows`, which makes rift believe the window is still on screen and
+    /// blocks orphan reconciliation. Cheap enough to run before each discovery pass.
+    pub(crate) fn refresh_visible_windows_snapshot(&mut self) {
+        let ws_info = self.authoritative_window_snapshot_for_active_spaces();
+        self.window_manager.visible_windows.clear();
+        self.window_manager.visible_windows.extend(ws_info.iter().map(|info| info.id));
+    }
+
     fn authoritative_window_snapshot_for_active_spaces(&self) -> Vec<WindowServerInfo> {
         let ws_info = window_server::get_visible_windows_with_layer(None);
         self.filter_ws_info_to_active_spaces(ws_info)
@@ -794,9 +861,20 @@ impl Reactor {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
         reactor.communication_manager.raise_manager_tx = raise_manager_tx.clone();
         let event_tap_tx = reactor.communication_manager.event_tap_tx.clone();
+        let reconcile_tx = events_tx.clone();
         let reactor_task = Self::run_reactor_loop(reactor, events);
         let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, event_tap_tx);
-        let _ = tokio::join!(reactor_task, raise_manager_task);
+        // Backstop for windows that close without notifying rift (e.g. Slack): tick a
+        // reconciliation so the space is reclaimed within ~1s even when no event fires.
+        let reconcile_task = async move {
+            loop {
+                crate::sys::timer::Timer::sleep(Duration::from_millis(1000)).await;
+                if reconcile_tx.try_send(Event::ReconcileOrphans).is_err() {
+                    break;
+                }
+            }
+        };
+        let _ = tokio::join!(reactor_task, raise_manager_task, reconcile_task);
     }
 
     async fn run_reactor_loop(mut reactor: Reactor, mut events: Receiver) {
@@ -1017,6 +1095,7 @@ impl Reactor {
             }
             Event::ApplicationDeactivated(pid) => {
                 self.clear_menu_state_for_pid(pid);
+                self.schedule_orphan_reconcile(pid);
             }
             Event::ApplicationGloballyDeactivated(pid) => {
                 self.clear_menu_state_for_pid(pid);
@@ -1131,14 +1210,10 @@ impl Reactor {
                 CommandEventHandler::handle_reassert_display_move(self, window_id);
             }
             Event::ApplicationMainWindowChanged(pid, _, _) => {
-                // Some apps — notably Electron (ChatGPT, Slack, …) — order their window
-                // out instead of destroying it when it closes, and never emit a
-                // window-destroyed notification, so rift keeps a phantom tile. Re-query
-                // the app's visible windows so the stale-window reconciliation in
-                // WindowsDiscovered can reap any window AX no longer reports.
-                if let Some(app) = self.app_manager.apps.get(&pid) {
-                    let _ = app.handle.send(Request::GetVisibleWindows);
-                }
+                self.schedule_orphan_reconcile(pid);
+            }
+            Event::ReconcileOrphans => {
+                self.reconcile_orphan_windows();
             }
             _ => (),
         }

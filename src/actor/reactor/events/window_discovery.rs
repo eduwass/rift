@@ -38,6 +38,11 @@ impl WindowDiscoveryHandler {
         let app_info =
             app_info.or_else(|| reactor.app_manager.apps.get(&pid).map(|app| app.info.clone()));
 
+        // Refresh the on-screen window-server snapshot from live state first: an app may
+        // have ordered a window out without a destroy notification, leaving a stale entry
+        // that would otherwise mask the orphan from the reconciliation below.
+        reactor.refresh_visible_windows_snapshot();
+
         let (stale_windows, pending_refresh) =
             Self::identify_stale_windows(reactor, pid, &known_visible);
         Self::cleanup_stale_windows(reactor, pid, stale_windows, pending_refresh);
