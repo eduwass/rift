@@ -87,16 +87,27 @@ impl WindowDiscoveryHandler {
                 .filter_map(|wsid| reactor.window_manager.window_ids.get(wsid))
                 .any(|wid| wid.pid == pid && !known_visible_set.contains(wid))
         };
-        // TODO: Rewrite it
-        let skip_stale_cleanup = matches!(
-            reactor.refocus_manager.stale_cleanup_state,
-            crate::actor::reactor::StaleCleanupState::Suppressed
-        ) || pending_refresh
-            || reactor.is_mission_control_active()
-            || reactor.is_in_drag()
-            || (known_visible_set.is_empty()
-                && !reactor.has_visible_window_server_ids_for_pid(pid))
-            || has_window_server_visibles_without_ax;
+        // Does rift's own model still track windows for this app? If so, even when AX
+        // and the window server both report nothing for the pid, those tracked windows
+        // may be orphans (e.g. an Electron window ordered out on close without a
+        // destroy notification) that we must reap. Only the genuinely-empty case
+        // (app launching, nothing tracked yet) is safe to skip.
+        let has_tracked_windows_for_pid =
+            reactor.window_manager.windows.keys().any(|wid| wid.pid == pid);
+
+        let skip_stale_cleanup = should_skip_stale_cleanup(StaleCleanupGuard {
+            suppressed: matches!(
+                reactor.refocus_manager.stale_cleanup_state,
+                crate::actor::reactor::StaleCleanupState::Suppressed
+            ),
+            pending_refresh,
+            mission_control_active: reactor.is_mission_control_active(),
+            in_drag: reactor.is_in_drag(),
+            known_visible_empty: known_visible_set.is_empty(),
+            has_window_server_visibles_for_pid: reactor.has_visible_window_server_ids_for_pid(pid),
+            has_window_server_visibles_without_ax,
+            has_tracked_windows_for_pid,
+        });
 
         if skip_stale_cleanup {
             return (Vec::new(), false);
@@ -542,6 +553,104 @@ impl WindowDiscoveryHandler {
             && reactor.is_space_active(space)
         {
             reactor.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
+        }
+    }
+}
+
+/// Inputs to the stale-window-cleanup skip decision, extracted as plain booleans so the
+/// policy can be unit-tested without a live window server.
+struct StaleCleanupGuard {
+    suppressed: bool,
+    pending_refresh: bool,
+    mission_control_active: bool,
+    in_drag: bool,
+    known_visible_empty: bool,
+    has_window_server_visibles_for_pid: bool,
+    has_window_server_visibles_without_ax: bool,
+    has_tracked_windows_for_pid: bool,
+}
+
+/// Decide whether to skip stale-window reconciliation for an app's discovery pass.
+///
+/// The subtle clause is the last grouped one: when AX reports no windows for the app and
+/// the window server shows none on screen either, we normally skip. But if rift's model
+/// still tracks windows for the pid, those are orphans — e.g. an Electron window (ChatGPT,
+/// Slack) ordered out on close without emitting a destroy notification — and must be
+/// reaped, so we only skip when nothing is tracked.
+fn should_skip_stale_cleanup(g: StaleCleanupGuard) -> bool {
+    g.suppressed
+        || g.pending_refresh
+        || g.mission_control_active
+        || g.in_drag
+        || (g.known_visible_empty
+            && !g.has_window_server_visibles_for_pid
+            && !g.has_tracked_windows_for_pid)
+        || g.has_window_server_visibles_without_ax
+}
+
+#[cfg(test)]
+mod stale_cleanup_guard_tests {
+    use super::should_skip_stale_cleanup;
+    use super::StaleCleanupGuard;
+
+    fn base() -> StaleCleanupGuard {
+        StaleCleanupGuard {
+            suppressed: false,
+            pending_refresh: false,
+            mission_control_active: false,
+            in_drag: false,
+            known_visible_empty: false,
+            has_window_server_visibles_for_pid: false,
+            has_window_server_visibles_without_ax: false,
+            has_tracked_windows_for_pid: false,
+        }
+    }
+
+    #[test]
+    fn orphan_window_is_not_skipped() {
+        // AX reports zero windows and the window server shows none on screen, but rift
+        // still tracks a window for the pid: that orphan must be reaped, not skipped.
+        // This is the ChatGPT/Electron close-without-destroy case.
+        let g = StaleCleanupGuard {
+            known_visible_empty: true,
+            has_window_server_visibles_for_pid: false,
+            has_tracked_windows_for_pid: true,
+            ..base()
+        };
+        assert!(!should_skip_stale_cleanup(g));
+    }
+
+    #[test]
+    fn empty_app_with_nothing_tracked_is_skipped() {
+        // No AX windows, none on screen, nothing tracked (e.g. an app mid-launch):
+        // there is nothing to reconcile, so skip.
+        let g = StaleCleanupGuard {
+            known_visible_empty: true,
+            has_window_server_visibles_for_pid: false,
+            has_tracked_windows_for_pid: false,
+            ..base()
+        };
+        assert!(should_skip_stale_cleanup(g));
+    }
+
+    #[test]
+    fn transient_guards_always_skip_even_with_tracked_windows() {
+        for g in [
+            StaleCleanupGuard { suppressed: true, has_tracked_windows_for_pid: true, ..base() },
+            StaleCleanupGuard { pending_refresh: true, has_tracked_windows_for_pid: true, ..base() },
+            StaleCleanupGuard {
+                mission_control_active: true,
+                has_tracked_windows_for_pid: true,
+                ..base()
+            },
+            StaleCleanupGuard { in_drag: true, has_tracked_windows_for_pid: true, ..base() },
+            StaleCleanupGuard {
+                has_window_server_visibles_without_ax: true,
+                has_tracked_windows_for_pid: true,
+                ..base()
+            },
+        ] {
+            assert!(should_skip_stale_cleanup(g));
         }
     }
 }

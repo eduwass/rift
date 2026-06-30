@@ -1130,6 +1130,16 @@ impl Reactor {
             Event::ReassertDisplayMove(window_id) => {
                 CommandEventHandler::handle_reassert_display_move(self, window_id);
             }
+            Event::ApplicationMainWindowChanged(pid, _, _) => {
+                // Some apps — notably Electron (ChatGPT, Slack, …) — order their window
+                // out instead of destroying it when it closes, and never emit a
+                // window-destroyed notification, so rift keeps a phantom tile. Re-query
+                // the app's visible windows so the stale-window reconciliation in
+                // WindowsDiscovered can reap any window AX no longer reports.
+                if let Some(app) = self.app_manager.apps.get(&pid) {
+                    let _ = app.handle.send(Request::GetVisibleWindows);
+                }
+            }
             _ => (),
         }
 
