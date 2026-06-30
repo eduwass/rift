@@ -23,7 +23,7 @@ use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -1542,9 +1542,20 @@ impl State {
             .iter()
             .filter_map(|elem| WindowServerId::try_from(elem).ok())
             .collect();
+        // Only treat a window as having a visible CG peer if it is actually on screen.
+        // `get_windows` returns info for any window the server still knows about, including
+        // ones ordered out — e.g. an Electron window (Slack, ChatGPT, …) the app hid on
+        // close instead of destroying. Intersect with the on-screen list so such orphans
+        // drop out of `known_visible` and get reconciled away instead of holding a phantom tile.
+        let on_screen: HashSet<WindowServerId> = window_server::get_visible_windows_with_layer(None)
+            .into_iter()
+            .map(|info| info.id)
+            .collect();
         let mut info_by_id = HashMap::with_capacity_and_hasher(wsids.len(), Default::default());
         for info in window_server::get_windows(&wsids) {
-            info_by_id.insert(info.id, info);
+            if on_screen.contains(&info.id) {
+                info_by_id.insert(info.id, info);
+            }
         }
         info_by_id
     }
