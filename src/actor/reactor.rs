@@ -285,12 +285,6 @@ pub struct Reactor {
     // async) and focus-follows-mouse then steals focus. Holds (window, destination display rect,
     // deadline) and fires once the window's centre is inside that rect or the deadline passes.
     pending_display_move_warp: Option<(WindowId, CGRect, std::time::Instant)>,
-    // Last (window, frame) we broadcast as WindowFocused. ~5 reactor sites (hover, raise, init,
-    // finalize, observed) can fire for one focus change, flooding subscribers with identical events
-    // (measured: ~8% of events under fast nav are sub-10ms duplicates). Dedup here so we only emit on
-    // a genuine change. Cell: broadcast_window_focused takes &self. Frame as [x,y,w,h] so a real move
-    // (resize) still emits, while a same-window same-frame re-fire is suppressed.
-    last_focus_broadcast: std::cell::Cell<Option<(WindowId, [f64; 4])>>,
 }
 
 impl Reactor {
@@ -418,7 +412,6 @@ impl Reactor {
             active_spaces: HashSet::default(),
             display_topology_manager: DisplayTopologyManager::default(),
             pending_display_move_warp: None,
-            last_focus_broadcast: std::cell::Cell::new(None),
         }
     }
 
@@ -1240,7 +1233,6 @@ impl Reactor {
         if let Some(raised_window) = raised_window {
             if let Some(space) = self.best_space_for_window_id(raised_window) {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
-                self.broadcast_window_focused(raised_window, space);
             }
         }
 
@@ -1254,16 +1246,6 @@ impl Reactor {
                 ),
             );
             self.maybe_send_menu_update();
-        }
-
-        // Keep the focus-border overlay synced when the focused window's frame changed without a
-        // focus change — i.e. a resize (opt+cmd+/-) or a re-tile/move. The renderer dedups, so
-        // re-broadcasting the focused frame here is a no-op unless it actually moved.
-        if (is_resize || layout_changed)
-            && let Some(wid) = self.main_window()
-            && let Some(space) = self.main_window_space()
-        {
-            self.broadcast_window_focused(wid, space);
         }
 
         let was_manual_workspace_switch = self.workspace_switch_manager.manual_switch_in_progress();
@@ -1619,7 +1601,6 @@ impl Reactor {
         if let Some(main_window) = self.main_window() {
             if let Some(space) = self.main_window_space() {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
-                self.broadcast_window_focused(main_window, space);
             }
         }
         let ws_info = self.filter_ws_info_to_active_spaces(ws_info);
@@ -1677,45 +1658,6 @@ impl Reactor {
             };
             let _ = self.communication_manager.event_broadcaster.send(event);
         }
-    }
-
-    // Broadcast the focused window's current frame so an event-driven overlay renderer can place a
-    // border/halo without polling. Called wherever focus changes (hover, raise, init). The renderer
-    // dedups redundant frames, so no server-side dedup is needed here.
-    pub(crate) fn broadcast_window_focused(&self, window_id: WindowId, space: SpaceId) {
-        let Some(window) = self.window_manager.windows.get(&window_id) else {
-            return;
-        };
-        let frame = window.frame_monotonic;
-        // Dedup: ~5 sites can fire for one focus change. Skip if the focused window AND its frame are
-        // unchanged from the last broadcast — collapses the redundant multi-site re-emits while still
-        // emitting on a real focus change or a frame change (resize/re-tile).
-        let frame_key = [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height];
-        if !focus_dedup_should_emit(self.last_focus_broadcast.get(), (window_id, frame_key)) {
-            return;
-        }
-        self.last_focus_broadcast.set(Some((window_id, frame_key)));
-        let display_uuid = self.display_uuid_for_space(space);
-        let is_floating = self.layout_manager.layout_engine.is_window_floating(window_id);
-        // Same monotonic clock the Swift renderer reads (CLOCK_UPTIME_RAW), so it can compute
-        // focus->draw latency. clock_gettime_nsec_np isn't re-exported by nix::libc; clock_gettime is.
-        let broadcast_ns = unsafe {
-            let mut ts: nix::libc::timespec = std::mem::zeroed();
-            nix::libc::clock_gettime(nix::libc::CLOCK_UPTIME_RAW, &mut ts);
-            ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
-        };
-        let event = BroadcastEvent::WindowFocused {
-            window_id,
-            frame_x: frame.origin.x,
-            frame_y: frame.origin.y,
-            frame_width: frame.size.width,
-            frame_height: frame.size.height,
-            is_floating,
-            space_id: space,
-            display_uuid,
-            broadcast_ns,
-        };
-        let _ = self.communication_manager.event_broadcaster.send(event);
     }
 
     pub(crate) fn broadcast_native_mission_control_entered(&self) {
@@ -3439,47 +3381,3 @@ impl Reactor {
     }
 }
 
-// Source-side dedup for WindowFocused: ~5 reactor sites can fire for one focus change, so skip an
-// emit when the focused window AND its frame are unchanged from the last broadcast. Keyed on both
-// (window_id, frame) so a real focus change OR a frame change (resize/re-tile) still emits, while a
-// redundant same-window same-frame re-fire is suppressed. Pure + generic so it's unit-tested below.
-fn focus_dedup_should_emit<Id: PartialEq + Copy>(
-    last: Option<(Id, [f64; 4])>,
-    cur: (Id, [f64; 4]),
-) -> bool {
-    last != Some(cur)
-}
-
-#[cfg(test)]
-mod focus_dedup_tests {
-    use super::focus_dedup_should_emit;
-
-    const F: [f64; 4] = [0.0, 0.0, 100.0, 100.0];
-
-    #[test]
-    fn first_emit_passes() {
-        assert!(focus_dedup_should_emit::<u32>(None, (1, F)));
-    }
-
-    #[test]
-    fn identical_window_and_frame_is_suppressed() {
-        assert!(!focus_dedup_should_emit(Some((1u32, F)), (1u32, F)));
-    }
-
-    #[test]
-    fn different_window_emits() {
-        assert!(focus_dedup_should_emit(Some((1u32, F)), (2u32, F)));
-    }
-
-    #[test]
-    fn same_window_resized_emits() {
-        let resized = [0.0, 0.0, 200.0, 100.0];
-        assert!(focus_dedup_should_emit(Some((1u32, F)), (1u32, resized)));
-    }
-
-    #[test]
-    fn same_window_moved_emits() {
-        let moved = [50.0, 0.0, 100.0, 100.0];
-        assert!(focus_dedup_should_emit(Some((1u32, F)), (1u32, moved)));
-    }
-}

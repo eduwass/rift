@@ -18,21 +18,6 @@ use crate::common::log::{MetricsCommand, handle_command};
 use crate::layout_engine::{EventResponse, LayoutCommand, LayoutEvent};
 use crate::sys::window_server::{self as window_server, WindowServerId};
 
-fn poke_border_for_window(window_server_id: Option<WindowServerId>) {
-    let Some(wsid) = window_server_id else { return };
-    let Some(home) = dirs::home_dir() else { return };
-    let state_dir = home.join(".local/state/rift");
-    let _ = std::fs::create_dir_all(&state_dir);
-    let _ = std::fs::write(state_dir.join("borders.target"), format!("{}\n", wsid.as_u32()));
-    let Ok(pid_text) = std::fs::read_to_string(state_dir.join("borders.pid")) else {
-        return;
-    };
-    let Ok(pid) = pid_text.trim().parse::<nix::libc::pid_t>() else {
-        return;
-    };
-    unsafe { nix::libc::kill(pid, nix::libc::SIGUSR1) };
-}
-
 pub struct CommandEventHandler;
 
 impl CommandEventHandler {
@@ -576,8 +561,6 @@ impl CommandEventHandler {
         // simply fires when the window reaches whichever display is current — never mid-transition.
         reactor.pending_display_move_warp =
             Some((window_id, dest_rect, std::time::Instant::now() + std::time::Duration::from_millis(600)));
-
-        poke_border_for_window(window_server_id);
 
         // A cross-display move's single SetWindowFrame can be CLAMPED by macOS to the source
         // display at apply-time (width = source.max_x - new_origin_x), leaving a tiled window stuck

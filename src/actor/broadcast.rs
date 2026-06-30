@@ -49,25 +49,6 @@ pub enum BroadcastEvent {
         space_id: SpaceId,
         display_uuid: Option<String>,
     },
-    // Fired whenever the focused window changes (keyboard focus, focus-follows-mouse, or a
-    // programmatic raise), carrying the window's current frame so an event-driven overlay
-    // renderer can place a border/halo without polling CGWindowList. Frame is sent as four plain
-    // f64s (CG top-left coords) to keep the JSON dependency-free for the Swift subscriber.
-    WindowFocused {
-        window_id: WindowId,
-        frame_x: f64,
-        frame_y: f64,
-        frame_width: f64,
-        frame_height: f64,
-        // Floating windows are excluded from tiling, so an overlay renderer can skip them (the old
-        // borders blacklisted floating apps). Lets the renderer match that without a round-trip.
-        is_floating: bool,
-        space_id: SpaceId,
-        display_uuid: Option<String>,
-        // Monotonic stamp (CLOCK_UPTIME_RAW ns) taken at emit, so an overlay renderer can measure
-        // end-to-end focus->draw latency against its own clock_gettime_nsec_np(CLOCK_UPTIME_RAW).
-        broadcast_ns: u64,
-    },
     MissionControlNativeEntered,
     MissionControlNativeExited,
 }

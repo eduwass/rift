@@ -249,9 +249,8 @@ impl WindowEventHandler {
             }
 
             if triggered_by_rift {
-                // Did rift's own move just SETTLE this window at its final frame (vs an intermediate
-                // frame mid-apply)? Tracked so we can re-broadcast below once placement is done.
-                let settled;
+                // rift's own move applied: commit the final frame to state and clear the tx target
+                // (intermediate mid-apply frames are skipped).
                 {
                     let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
                         return false;
@@ -264,7 +263,6 @@ impl WindowEventHandler {
                                 window.frame_monotonic = new_frame;
                             }
                             reactor.transaction_manager.clear_target_for_window(wsid);
-                            settled = true;
                         } else {
                             trace!(
                                 ?wid,
@@ -272,7 +270,6 @@ impl WindowEventHandler {
                                 ?target,
                                 "Skipping intermediate frame from Rift request"
                             );
-                            settled = false;
                         }
                     } else if !window.frame_monotonic.same_as(new_frame) {
                         debug!(
@@ -284,24 +281,9 @@ impl WindowEventHandler {
                         if let Some(wsid) = window.info.sys_id {
                             reactor.transaction_manager.clear_target_for_window(wsid);
                         }
-                        settled = true;
-                    } else {
-                        settled = false;
                     }
                 }
 
-                // rift just finished placing this window (re-tile, new-window open, fullscreen, gap
-                // toggle, move-node, …). Unlike an observed app/drag change, this path returns without
-                // re-broadcasting, so the event-driven focus border would stay on the pre-move frame
-                // until the next focus change. Re-broadcast for the focused window so the border tracks
-                // every rift-driven move — one place that covers all these cases (mirrors the
-                // drag-follow re-broadcast below).
-                if settled
-                    && reactor.main_window() == Some(wid)
-                    && let Some(space) = reactor.best_space_for_window(&new_frame, server_id)
-                {
-                    reactor.broadcast_window_focused(wid, space);
-                }
 
                 return false;
             }
@@ -342,14 +324,6 @@ impl WindowEventHandler {
                 window.frame_monotonic = new_frame;
             }
 
-            // Mouse drag (resize/move) reaches here as an observed frame change — not via rift's
-            // apply path that finalize_event_processing covers. If it's the focused window,
-            // re-broadcast so the event-driven focus border follows the drag live.
-            if reactor.main_window() == Some(wid)
-                && let Some(space) = new_space
-            {
-                reactor.broadcast_window_focused(wid, space);
-            }
 
             let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
 
@@ -502,15 +476,11 @@ impl WindowEventHandler {
         reactor.raise_window(wid, Quiet::No, None);
         let raise_us = t_raise.elapsed().as_micros() as u64;
 
-        let mut bcast_us = 0u64;
         if let Some(window) = reactor.window_manager.windows.get(&wid) {
             if let Some(space) =
                 active_space_for_window(reactor, &window.frame_monotonic, window.info.sys_id)
             {
                 reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
-                let t_b = Instant::now();
-                reactor.broadcast_window_focused(wid, space);
-                bcast_us = t_b.elapsed().as_micros() as u64;
                 FFM_EMITS.with(|c| c.set(c.get() + 1));
             }
         }
@@ -522,7 +492,6 @@ impl WindowEventHandler {
                 total_us,
                 gate_us,
                 raise_us,
-                bcast_us,
                 gap_ms = since_last.map(|d| d.as_millis() as u64).unwrap_or(0),
                 "ffm-perf slow handle_mouse_moved_over_window"
             );
@@ -544,7 +513,7 @@ impl WindowEventHandler {
                     calls,
                     emits,
                     avg_us = sum_us / calls,
-                    "ffm-perf 1s summary (calls=handler invocations, emits=window_focused broadcasts)"
+                    "ffm-perf 1s summary (calls=handler invocations, emits=focus events)"
                 );
             }
         }

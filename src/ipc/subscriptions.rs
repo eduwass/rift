@@ -187,7 +187,6 @@ impl ServerState {
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
             BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
             BroadcastEvent::StacksChanged { .. } => "stacks_changed",
-            BroadcastEvent::WindowFocused { .. } => "window_focused",
             BroadcastEvent::MissionControlNativeEntered => "mission_control_native_entered",
             BroadcastEvent::MissionControlNativeExited => "mission_control_native_exited",
         };
@@ -238,7 +237,6 @@ impl ServerState {
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
             BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
             BroadcastEvent::StacksChanged { .. } => "stacks_changed",
-            BroadcastEvent::WindowFocused { .. } => "window_focused",
             BroadcastEvent::MissionControlNativeEntered => "mission_control_native_entered",
             BroadcastEvent::MissionControlNativeExited => "mission_control_native_exited",
         };
