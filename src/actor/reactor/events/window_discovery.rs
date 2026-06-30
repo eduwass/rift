@@ -185,11 +185,20 @@ pub(crate) fn identify_stale_windows(
         .windows
         .iter_visible_window_server_ids()
         .any(|wsid| state.windows.tracked_window_id(wsid).is_some_and(|wid| wid.pid == pid));
+    // Does rift's own model still track windows for this app? If so, even when AX
+    // and the window server both report nothing for the pid, those tracked windows
+    // may be orphans (e.g. an Electron window ordered out on close without a
+    // destroy notification) that we must reap. Only the genuinely-empty case
+    // (app launching, nothing tracked yet) is safe to skip.
+    let has_tracked_windows_for_pid =
+        state.windows.iter_windows().any(|(wid, _)| wid.pid == pid);
     let skip_stale_cleanup = snapshot.suppressed
         || pending_refresh
         || snapshot.mission_control_active
         || snapshot.drag_active
-        || (known_visible_set.is_empty() && !has_visible_window_server_ids)
+        || (known_visible_set.is_empty()
+            && !has_visible_window_server_ids
+            && !has_tracked_windows_for_pid)
         || has_window_server_visibles_without_ax;
 
     if skip_stale_cleanup {

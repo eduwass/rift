@@ -1773,6 +1773,17 @@ impl Reactor {
                     window_id,
                 );
             }
+            Event::ApplicationMainWindowChanged(pid, _, _) => {
+                // Some apps — notably Electron (ChatGPT, Slack, …) — order their window
+                // out instead of destroying it when it closes, and never emit a
+                // window-destroyed notification, so rift keeps a phantom tile. Re-query
+                // the app's visible windows so the stale-window reconciliation in
+                // WindowsDiscovered can reap any window AX no longer reports.
+                if self.app_manager.apps.contains_key(&pid) {
+                    return Ok(EventOutcome::finalized_event(None, false, false, false)
+                        .with_app_request(pid, Request::GetVisibleWindows));
+                }
+            }
             _ => (),
         }
 
