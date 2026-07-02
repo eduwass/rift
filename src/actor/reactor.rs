@@ -31,6 +31,7 @@ use events::system::SystemEventHandler;
 use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
+use objc2_app_kit::NSRunningApplication;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
@@ -593,6 +594,7 @@ impl Reactor {
         let on_screen: HashSet<WindowServerId> =
             window_server::get_visible_windows_with_layer(None).into_iter().map(|i| i.id).collect();
         let mut pids: HashSet<pid_t> = HashSet::default();
+        let mut dead_pids: HashSet<pid_t> = HashSet::default();
         for space in self.active_spaces.clone() {
             for wid in self.layout_manager.layout_engine.windows_in_active_workspace(space) {
                 if self.layout_manager.layout_engine.is_window_floating(wid) {
@@ -607,9 +609,30 @@ impl Reactor {
                 if let Some(ws_id) = state.info.sys_id
                     && !on_screen.contains(&ws_id)
                 {
-                    pids.insert(wid.pid);
+                    if NSRunningApplication::runningApplicationWithProcessIdentifier(wid.pid)
+                        .is_none()
+                    {
+                        dead_pids.insert(wid.pid);
+                    } else {
+                        pids.insert(wid.pid);
+                    }
                 }
             }
+        }
+        for pid in dead_pids {
+            pids.remove(&pid);
+            self.app_manager.apps.remove(&pid);
+            let dead_windows: Vec<WindowId> = self
+                .window_manager
+                .windows
+                .keys()
+                .copied()
+                .filter(|wid| wid.pid == pid)
+                .collect();
+            for wid in dead_windows {
+                WindowEventHandler::handle_window_destroyed(self, wid);
+            }
+            self.send_layout_event(LayoutEvent::AppClosed(pid));
         }
         for pid in pids {
             if let Some(app) = self.app_manager.apps.get(&pid) {
