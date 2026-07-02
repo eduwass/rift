@@ -1061,6 +1061,23 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
         let selection = self.selection(layout);
         if let Some(_focused_window) = self.window_at(selection) {
+            let directions = selection
+                .parent(self.map())
+                .map(|parent| match self.layout(parent).orientation() {
+                    Orientation::Horizontal => [
+                        Direction::Right,
+                        Direction::Left,
+                        Direction::Down,
+                        Direction::Up,
+                    ],
+                    Orientation::Vertical => [
+                        Direction::Down,
+                        Direction::Up,
+                        Direction::Right,
+                        Direction::Left,
+                    ],
+                })
+                .unwrap_or([Direction::Right, Direction::Down, Direction::Left, Direction::Up]);
             let candidates = selection
                 .ancestors(self.map())
                 .filter(|&node| {
@@ -1072,12 +1089,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 })
                 .collect::<Vec<_>>();
 
-            for direction in [
-                crate::layout_engine::Direction::Right,
-                crate::layout_engine::Direction::Down,
-                crate::layout_engine::Direction::Left,
-                crate::layout_engine::Direction::Up,
-            ] {
+            for direction in directions {
                 if candidates.iter().any(|&node| self.resize_internal(node, amount, direction)) {
                     break;
                 }
@@ -4303,6 +4315,66 @@ mod tests {
             .collect();
 
         assert_eq!(first_selected, second_selected);
+    }
+
+    #[test]
+    fn resizing_child_in_vertical_group_prefers_height() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let a = w(133);
+        let b = w(134);
+        let c = w(135);
+        let d = w(136);
+        system.add_window_after_selection(layout, a);
+        system.add_window_after_selection(layout, b);
+        system.add_window_after_selection(layout, c);
+        system.add_window_after_selection(layout, d);
+
+        assert!(system.select_window(layout, c));
+        system.join_selection_with_direction(layout, Direction::Down);
+        assert!(system.select_window(layout, c));
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let before: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &Default::default(),
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        system.resize_selection_by(layout, 0.10);
+
+        let after: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &Default::default(),
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        let before_c = before.get(&c).copied().expect("before C frame");
+        let after_c = after.get(&c).copied().expect("after C frame");
+        assert_eq!(before_c.size.width, after_c.size.width);
+        assert!(
+            after_c.size.height > before_c.size.height,
+            "resize should grow height inside a vertical group"
+        );
     }
 
     #[test]
