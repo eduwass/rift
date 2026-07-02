@@ -76,6 +76,7 @@ use events::{
 };
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
+use objc2_app_kit::NSRunningApplication;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
@@ -610,7 +611,7 @@ impl Reactor {
         self.reconcile_authoritative_active_window_snapshot(active_windows, false);
     }
 
-    fn orphan_reconcile_outcome(&self) -> EventOutcome {
+    fn orphan_reconcile_outcome(&mut self) -> EventOutcome {
         let mut outcome = EventOutcome::finalized_event(None, false, false, false);
         if self.is_mission_control_active() || self.is_in_drag() {
             return outcome;
@@ -618,6 +619,7 @@ impl Reactor {
         let on_screen: HashSet<WindowServerId> =
             window_server::get_visible_windows_with_layer(None).into_iter().map(|i| i.id).collect();
         let mut pids: HashSet<pid_t> = HashSet::default();
+        let mut dead_pids: HashSet<pid_t> = HashSet::default();
         for space in self.iter_active_spaces() {
             for wid in self
                 .layout_manager
@@ -636,9 +638,40 @@ impl Reactor {
                 if let Some(ws_id) = window.info.sys_id
                     && !on_screen.contains(&ws_id)
                 {
-                    pids.insert(wid.pid);
+                    if NSRunningApplication::runningApplicationWithProcessIdentifier(wid.pid)
+                        .is_none()
+                    {
+                        dead_pids.insert(wid.pid);
+                    } else {
+                        pids.insert(wid.pid);
+                    }
                 }
             }
+        }
+        for pid in dead_pids {
+            pids.remove(&pid);
+            self.app_manager.apps.remove(&pid);
+            let dead_windows: Vec<WindowId> = self
+                .state
+                .windows
+                .iter_windows()
+                .filter_map(|(wid, _)| (wid.pid == pid).then_some(wid))
+                .collect();
+            for wid in dead_windows {
+                if let Ok(destroyed) = window_workflow::handle_window_destroyed(
+                    &mut self.state,
+                    &self.transaction_manager,
+                    &mut self.drag_manager,
+                    window_workflow::WindowDestroyedPayload {
+                        window: wid,
+                        suppress_if_window_alive: false,
+                        platform_window_alive: false,
+                    },
+                ) {
+                    outcome.absorb(destroyed);
+                }
+            }
+            outcome = outcome.with_layout_event(LayoutEvent::AppClosed(pid));
         }
         for pid in pids {
             if self.app_manager.apps.contains_key(&pid) {
