@@ -271,7 +271,10 @@ mod stack;
 pub use stack::StackLayoutSystem;
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+// Externally tagged (serde default): ron round-trips this cleanly, whereas the
+// internal `tag = "kind"` form serializes but fails to deserialize (ron cannot
+// self-describe internally-tagged enums). Persistence depends on the round-trip.
+#[serde(rename_all = "snake_case")]
 #[derive(Debug)]
 #[enum_dispatch(LayoutSystem)]
 pub enum LayoutSystemKind {
