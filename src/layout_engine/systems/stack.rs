@@ -245,6 +245,10 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
+    fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        self.inner.rewrite_window_id(old, new);
+    }
+
     fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
         self.inner.windows_for_app(layout, pid)
     }

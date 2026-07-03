@@ -121,6 +121,11 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId);
     fn remove_window(&mut self, wid: WindowId);
     fn remove_windows_for_app(&mut self, pid: pid_t);
+    /// Replace every occurrence of `old` with `new`, preserving the window's exact
+    /// tree position (node, ratios, stacking). Used by restore-time window adoption
+    /// to graft a freshly-discovered window onto the slot its pre-restart identity
+    /// held. A no-op if `old` is absent.
+    fn rewrite_window_id(&mut self, old: WindowId, new: WindowId);
     fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId>;
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>);
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool;

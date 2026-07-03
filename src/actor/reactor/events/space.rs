@@ -250,6 +250,12 @@ impl SpaceEventHandler {
                 .map(|screen| (screen.id, screen.frame.size))
                 .collect();
             reactor.space_manager.screens = screens;
+            // Screens (and thus the display fingerprint) are now known: on the first
+            // such event lift the matching saved arrangement into the engine, then
+            // resolve saved space identities to the live SpaceIds. Both run before
+            // active-space exposition below so it operates on the restored engine.
+            reactor.activate_restore_if_ready();
+            reactor.remap_restored_spaces();
             let resized_screens: HashSet<ScreenId> = reactor
                 .space_manager
                 .screens

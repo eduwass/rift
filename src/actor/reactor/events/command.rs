@@ -12,7 +12,7 @@ use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{menu_bar, raise_manager};
 use crate::common::collections::HashMap;
-use crate::common::config::{self as config, Config};
+use crate::common::config::Config;
 use crate::common::log::{MetricsCommand, handle_command};
 use crate::layout_engine::{EventResponse, LayoutCommand, LayoutEvent};
 use crate::sys::dispatch::DispatchExt;
@@ -251,7 +251,11 @@ impl CommandEventHandler {
     }
 
     pub fn handle_command_reactor_save_and_exit(reactor: &mut Reactor) {
-        match reactor.layout_manager.layout_engine.save(config::restore_file()) {
+        // Route through the snapshot assembler (engine + identity sidecars),
+        // read-modify-writing the arrangement file so other display fingerprints
+        // survive. Correctness never depends on this — the debounced writer keeps
+        // the file ≤1s stale — it just makes a clean exit's file current.
+        match reactor.save_snapshot_now() {
             Ok(()) => std::process::exit(0),
             Err(e) => {
                 error!("Could not save layout: {e}");

@@ -11,7 +11,7 @@ use crate::common::config::{
 };
 use crate::common::log::trace_misc;
 use crate::layout_engine::Direction;
-use crate::layout_engine::systems::LayoutSystemKind;
+use crate::layout_engine::systems::{LayoutSystem, LayoutSystemKind};
 use crate::sys::app::pid_t;
 use crate::sys::geometry::CGRectDef;
 use crate::sys::screen::SpaceId;
@@ -150,6 +150,18 @@ impl VirtualWorkspace {
 
     pub fn window_count(&self) -> usize {
         self.windows.len()
+    }
+
+    /// Repoint this workspace's window set, last-focus, and layout tree from `old`
+    /// to `new` in place (restore-time adoption). Preserves tree position exactly.
+    fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if self.windows.remove(&old) {
+            self.windows.insert(new);
+        }
+        if self.last_focused == Some(old) {
+            self.last_focused = Some(new);
+        }
+        self.layout_system.rewrite_window_id(old, new);
     }
 }
 
@@ -748,6 +760,40 @@ impl VirtualWorkspaceManager {
                 self.window_rule_floating.remove(&(space, wid));
                 self.last_rule_decision.remove(&(space, wid));
             }
+        }
+    }
+
+    /// Replace `old` with `new` across every workspace tree, the window set, the
+    /// window->workspace index, the rule caches, and stored floating positions —
+    /// preserving each window's exact placement. Restore-time adoption path.
+    pub fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if old == new {
+            return;
+        }
+        for (_, workspace) in self.workspaces.iter_mut() {
+            workspace.rewrite_window_id(old, new);
+        }
+
+        let remapped_keys: Vec<(SpaceId, WindowId)> = self
+            .window_to_workspace
+            .keys()
+            .copied()
+            .filter(|(_, wid)| *wid == old)
+            .collect();
+        for (space, _) in remapped_keys {
+            if let Some(ws_id) = self.window_to_workspace.remove(&(space, old)) {
+                self.window_to_workspace.insert((space, new), ws_id);
+            }
+            if let Some(v) = self.window_rule_floating.remove(&(space, old)) {
+                self.window_rule_floating.insert((space, new), v);
+            }
+            if let Some(v) = self.last_rule_decision.remove(&(space, old)) {
+                self.last_rule_decision.insert((space, new), v);
+            }
+        }
+
+        for positions in self.floating_positions.values_mut() {
+            positions.rewrite_window_id(old, new);
         }
     }
 
@@ -1716,6 +1762,12 @@ impl FloatingWindowPositions {
 
     fn remove_app_windows(&mut self, pid: pid_t) {
         self.positions.retain(|window_id, _| window_id.pid != pid);
+    }
+
+    fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if let Some(position) = self.positions.remove(&old) {
+            self.positions.insert(new, position);
+        }
     }
 }
 

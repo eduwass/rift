@@ -50,6 +50,10 @@ impl WindowDiscoveryHandler {
         Self::update_window_states(reactor, new_windows, &app_info);
 
         Self::emit_layout_events(reactor, pid, &known_visible, &app_info);
+
+        // This app's windows have all been offered for adoption; anything left
+        // pending for its pid pre-dated the restart and is gone now, so drop it.
+        reactor.prune_app_adoptions(pid);
     }
 
     fn sync_window_server_id_mapping(
@@ -366,6 +370,13 @@ impl WindowDiscoveryHandler {
         space: SpaceId,
         app_info: &Option<AppInfo>,
     ) -> Result<AppRuleResult, WorkspaceError> {
+        // Restore-time exact adoption runs before app-rules: if this window's
+        // window-server id matches a pending pre-restart identity, it inherits that
+        // window's exact tree slot instead of being placed anew.
+        if let Some(result) = reactor.try_adopt_window(wid, space) {
+            return result;
+        }
+
         let Some(window) = reactor.window_manager.windows.get(&wid) else {
             return Err(WorkspaceError::AssignmentFailed);
         };
