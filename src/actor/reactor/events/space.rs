@@ -224,6 +224,14 @@ impl SpaceEventHandler {
         let should_trigger_topology = topology_changed
             && (reactor.space_manager.has_seen_display_set || !previous_displays.is_empty());
 
+        // Before rift migrates windows off any disconnected display below, persist
+        // the intact engine under the arrangement we are leaving so it can be
+        // restored on replug. Only on a genuine display-set change to a non-empty
+        // set (an all-unplugged blackout is transient, not an arrangement).
+        if should_trigger_topology && !screens.is_empty() {
+            reactor.save_arrangement_before_switch(&screens);
+        }
+
         if displays_changed {
             let active_list: Vec<String> = new_displays.iter().cloned().collect();
             reactor.layout_manager.layout_engine.prune_display_state(&active_list);
@@ -255,6 +263,10 @@ impl SpaceEventHandler {
             // resolve saved space identities to the live SpaceIds. Both run before
             // active-space exposition below so it operates on the restored engine.
             reactor.activate_restore_if_ready();
+            // If the display set changed to one with a saved arrangement, lift it
+            // into the engine now (before spaces are exposed), running the same
+            // adoption machinery as startup restore against the live windows.
+            reactor.load_arrangement_after_switch();
             reactor.remap_restored_spaces();
             let resized_screens: HashSet<ScreenId> = reactor
                 .space_manager
