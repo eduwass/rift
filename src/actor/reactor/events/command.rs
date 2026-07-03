@@ -66,9 +66,13 @@ impl CommandEventHandler {
                 | LayoutCommand::PrevWorkspace(_)
                 | LayoutCommand::SwitchToWorkspace(_)
                 | LayoutCommand::SetWorkspaceLayout { .. }
+                | LayoutCommand::SetWorkspaceName { .. }
                 | LayoutCommand::CreateWorkspace
                 | LayoutCommand::SwitchToLastWorkspace
         );
+        // A rename mutates persisted engine state without moving any window, so
+        // it must explicitly mark the layout dirty for the debounced save.
+        let persists_without_window_change = matches!(cmd, LayoutCommand::SetWorkspaceName { .. });
         let command_space = reactor.workspace_command_space();
         let workspace_space = if requires_workspace_space {
             if let Some(space) = command_space {
@@ -94,6 +98,7 @@ impl CommandEventHandler {
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
             | LayoutCommand::SetWorkspaceLayout { .. }
+            | LayoutCommand::SetWorkspaceName { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => {
                 if let Some(space) = workspace_space {
@@ -140,6 +145,9 @@ impl CommandEventHandler {
         };
 
         reactor.handle_layout_response(response, workspace_space, false);
+        if persists_without_window_change {
+            reactor.mark_layout_dirty();
+        }
         if requires_workspace_space {
             reactor.update_event_tap_layout_mode();
         }

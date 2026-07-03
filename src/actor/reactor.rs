@@ -2215,9 +2215,19 @@ impl Reactor {
             return;
         }
 
+        info!(?wid, "Pinned topmost window");
+        self.pin_topmost_window(wid);
+    }
+
+    /// Pin `wid` above other windows with a fresh reassert state and raise it now.
+    /// Shared by the explicit toggle and by restore re-adoption so both seed the
+    /// yield bookkeeping (`TopmostWindowState`) identically; the reassert loop and
+    /// burial detection then treat a restored pin exactly like a freshly toggled
+    /// one. Always an explicit pin (`implicit: false`); implicit float-sweep pins
+    /// are re-derived from floating state by `sync_floating_topmost`.
+    pub(crate) fn pin_topmost_window(&mut self, wid: WindowId) {
         self.topmost_optout.remove(&wid);
         self.topmost_windows.insert(wid, TopmostWindowState::default());
-        info!(?wid, "Pinned topmost window");
         self.raise_topmost_windows(vec![wid]);
     }
 

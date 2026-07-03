@@ -59,6 +59,11 @@ pub enum AppRuleResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VirtualWorkspace {
     pub name: String,
+    /// A user-set rename that persists across restarts and config re-applies.
+    /// When present it wins over the config-derived `name` (see `display_name`);
+    /// `None` falls back to `name`. Cleared by renaming to an empty string.
+    #[serde(default)]
+    pub custom_name: Option<String>,
     pub space: SpaceId,
     windows: HashSet<WindowId>,
     last_focused: Option<WindowId>,
@@ -77,12 +82,20 @@ impl VirtualWorkspace {
         let layout_system = Self::create_layout_system(mode, settings);
         Self {
             name,
+            custom_name: None,
             space,
             windows: HashSet::default(),
             last_focused: None,
             layout_system,
             layout_mode: mode,
         }
+    }
+
+    /// The name shown to the user and returned by every workspace query: a
+    /// user-set [`custom_name`](Self::custom_name) wins over the config-derived
+    /// [`name`](Self::name), so a persisted rename survives a config re-apply.
+    pub fn display_name(&self) -> &str {
+        self.custom_name.as_deref().unwrap_or(&self.name)
     }
 
     pub fn tree(&self) -> &LayoutSystemKind {
@@ -314,6 +327,19 @@ impl VirtualWorkspaceManager {
 
         let spaces: Vec<SpaceId> = self.workspaces_by_space.keys().copied().collect();
         for space in spaces {
+            // Refresh each existing workspace's config-derived default `name` by
+            // index so a changed `workspace_names` config takes effect on re-apply.
+            // `custom_name` is deliberately left untouched — a user rename keeps
+            // winning in `display_name`, so a restored rename survives config
+            // re-apply while un-renamed workspaces follow the config.
+            let existing = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
+            for (idx, id) in existing.iter().enumerate() {
+                if let Some(name) = self.default_workspace_names.get(idx) {
+                    if let Some(ws) = self.workspaces.get_mut(*id) {
+                        ws.name = name.clone();
+                    }
+                }
+            }
             while self.workspaces_by_space.get(&space).unwrap().len() < target_count {
                 let idx = self.workspaces_by_space.get(&space).unwrap().len();
                 let name = if let Some(n) = self.default_workspace_names.get(idx) {
@@ -1302,12 +1328,15 @@ impl VirtualWorkspaceManager {
         let ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
         let workspaces: Vec<_> = ids
             .into_iter()
-            .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.clone())))
+            .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.display_name().to_string())))
             .collect();
         //workspaces.sort_by(|a, b| a.1.cmp(&b.1));
         workspaces
     }
 
+    /// Set a workspace's persisted [`custom_name`](VirtualWorkspace::custom_name),
+    /// which wins over the config-derived name. An empty (or whitespace-only)
+    /// `new_name` clears it, reverting to the config default.
     pub fn rename_workspace(
         &mut self,
         space: SpaceId,
@@ -1318,7 +1347,8 @@ impl VirtualWorkspaceManager {
             return false;
         }
         if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
-            workspace.name = new_name;
+            workspace.custom_name =
+                if new_name.trim().is_empty() { None } else { Some(new_name) };
 
             true
         } else {
@@ -1836,6 +1866,71 @@ mod tests {
 
         let workspace = manager.workspace_info(space, ws_id).unwrap();
         assert_eq!(workspace.name, "Test Workspace");
+    }
+
+    #[test]
+    fn custom_name_wins_and_survives_config_reapply_and_clears_to_default() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        while settings.workspace_names.len() < 2 {
+            settings
+                .workspace_names
+                .push(format!("Workspace {}", settings.workspace_names.len() + 1));
+        }
+        settings.workspace_names[0] = "one".to_string();
+        settings.workspace_names[1] = "two".to_string();
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+
+        let space = SpaceId::new(1);
+        let ids: Vec<_> = manager.list_workspaces(space).iter().map(|(id, _)| *id).collect();
+        let ws0 = ids[0];
+
+        let display_names = |m: &mut VirtualWorkspaceManager| -> Vec<String> {
+            m.list_workspaces(space).into_iter().map(|(_, n)| n).collect()
+        };
+
+        // A custom rename wins over the config-derived default; the other
+        // workspace still shows its config name.
+        assert!(manager.rename_workspace(space, ws0, "custom".to_string()));
+        assert_eq!(display_names(&mut manager)[0], "custom", "custom name wins");
+        assert_eq!(display_names(&mut manager)[1], "two", "un-renamed follows config");
+
+        // Re-applying config with changed defaults: the custom name survives, the
+        // un-renamed workspace follows the new config default.
+        let mut updated = settings.clone();
+        updated.workspace_names[0] = "one-changed".to_string();
+        updated.workspace_names[1] = "two-changed".to_string();
+        manager.update_settings(&updated, &LayoutSettings::default());
+        assert_eq!(display_names(&mut manager)[0], "custom", "custom survives config re-apply");
+        assert_eq!(display_names(&mut manager)[1], "two-changed", "non-custom follows new config");
+
+        // Clearing (empty/whitespace name) reverts to the current config default.
+        assert!(manager.rename_workspace(space, ws0, "   ".to_string()));
+        assert_eq!(
+            display_names(&mut manager)[0],
+            "one-changed",
+            "empty name clears the custom name back to the config default"
+        );
+        assert!(
+            manager.workspace_info(space, ws0).unwrap().custom_name.is_none(),
+            "cleared custom_name is None"
+        );
+    }
+
+    #[test]
+    fn custom_name_roundtrips_through_ron() {
+        let mut manager = VirtualWorkspaceManager::new();
+        let space = SpaceId::new(1);
+        let ws = manager.create_workspace(space, Some("default".to_string())).unwrap();
+        assert!(manager.rename_workspace(space, ws, "renamed".to_string()));
+
+        let serialized = ron::ser::to_string(&manager).unwrap();
+        let mut restored: VirtualWorkspaceManager = ron::from_str(&serialized).unwrap();
+        assert_eq!(
+            restored.list_workspaces(space).into_iter().find(|(id, _)| *id == ws).unwrap().1,
+            "renamed",
+            "custom name survives serialize/deserialize"
+        );
     }
 
     #[test]

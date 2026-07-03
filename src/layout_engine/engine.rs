@@ -90,6 +90,12 @@ pub enum LayoutCommand {
         workspace: Option<usize>,
         mode: LayoutMode,
     },
+    /// Set a workspace's persisted custom name (or the active workspace when
+    /// `workspace` is omitted). An empty `name` clears it back to the default.
+    SetWorkspaceName {
+        workspace: Option<usize>,
+        name: String,
+    },
     CreateWorkspace,
     SwitchToLastWorkspace,
 
@@ -1052,7 +1058,7 @@ impl LayoutEngine {
         let workspace_name = self
             .virtual_workspace_manager
             .workspace_info(space_id, workspace_id)
-            .map(|ws| ws.name.clone())
+            .map(|ws| ws.display_name().to_string())
             .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
         Some((workspace_id, workspace_name))
     }
@@ -1719,6 +1725,7 @@ impl LayoutEngine {
             | LayoutCommand::SwitchToWorkspace(_)
             | LayoutCommand::MoveWindowToWorkspace { .. }
             | LayoutCommand::SetWorkspaceLayout { .. }
+            | LayoutCommand::SetWorkspaceName { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => EventResponse::default(),
             LayoutCommand::JoinWindow(direction) => {
@@ -2488,6 +2495,16 @@ impl LayoutEngine {
                 }
                 EventResponse::default()
             }
+            LayoutCommand::SetWorkspaceName { workspace, name } => {
+                let Some(workspace_id) = self.workspace_id_for_index(space, *workspace) else {
+                    return EventResponse::default();
+                };
+                if self.virtual_workspace_manager.rename_workspace(space, workspace_id, name.clone())
+                {
+                    self.broadcast_workspace_changed(space);
+                }
+                EventResponse::default()
+            }
             LayoutCommand::SetWorkspaceLayout { workspace, mode } => {
                 let Some(workspace_id) = self.workspace_id_for_index(space, *workspace) else {
                     return EventResponse::default();
@@ -2701,7 +2718,7 @@ impl LayoutEngine {
     ) -> Option<String> {
         self.virtual_workspace_manager
             .workspace_info(space, workspace_id)
-            .map(|ws| ws.name.clone())
+            .map(|ws| ws.display_name().to_string())
     }
 
     pub fn windows_in_active_workspace(&self, space: SpaceId) -> Vec<WindowId> {
@@ -2808,7 +2825,7 @@ impl LayoutEngine {
                 info!(
                     "Space {:?}: Active workspace '{}' with {} windows",
                     space,
-                    workspace.name,
+                    workspace.display_name(),
                     active_windows.len()
                 );
                 info!("  Active windows: {:?}", active_windows);
