@@ -112,21 +112,21 @@ impl AdoptionTable {
         ranked.into_iter().map(|(k, wid, _)| (k, wid)).collect()
     }
 
-    /// Remove every unclaimed entry belonging to a launched app, returning their
-    /// pre-restart ids so the caller can evict them from the engine. An entry
-    /// matches on stable `pid` (a plain rift restart keeps pids) *or* on durable
-    /// `bundle_id` (after a reboot pids change but bundle ids do not).
-    fn prune_app(&mut self, pid: pid_t, bundle_id: Option<&str>) -> Vec<WindowId> {
-        let keys: Vec<WindowServerId> = self
-            .by_server_id
+    /// Keys of every unclaimed entry belonging to a launched app — its saved
+    /// server id (the table key, used to `claim`) paired with the pre-restart id —
+    /// *without* removing them, so the caller can decide per entry whether to adopt
+    /// a still-living window or evict a vanished one. An entry matches on stable
+    /// `pid` (a plain rift restart keeps pids) *or* on durable `bundle_id` (after a
+    /// reboot pids change but bundle ids do not).
+    fn app_entry_keys(&self, pid: pid_t, bundle_id: Option<&str>) -> Vec<(WindowServerId, WindowId)> {
+        self.by_server_id
             .iter()
             .filter(|(_, e)| {
                 e.old_wid.pid == pid
                     || bundle_id.is_some_and(|b| !b.is_empty() && e.identity.bundle_id == b)
             })
-            .map(|(k, _)| *k)
-            .collect();
-        keys.into_iter().filter_map(|k| self.by_server_id.remove(&k)).map(|e| e.old_wid).collect()
+            .map(|(k, e)| (*k, e.old_wid))
+            .collect()
     }
 
     /// Remove and return every remaining entry's pre-restart id.
@@ -703,13 +703,60 @@ impl Reactor {
         if self.persistence.adoption.is_empty() {
             return;
         }
-        // Prune by the launched app's durable bundle id, not its pid: a reboot
+        // Select by the launched app's durable bundle id, not its pid: a reboot
         // gives relaunched apps fresh pids, so the pre-restart `old_wid.pid` no
-        // longer identifies them. `prune_app` still honours a pid match too, so a
-        // plain restart (pids stable) keeps working.
+        // longer identifies them. `app_entry_keys` still honours a pid match too, so
+        // a plain restart (pids stable) keeps working.
         let bundle_id = self.app_manager.apps.get(&pid).and_then(|a| a.info.bundle_id.clone());
-        let stale = self.persistence.adoption.prune_app(pid, bundle_id.as_deref());
+        let candidates = self.persistence.adoption.app_entry_keys(pid, bundle_id.as_deref());
+        let mut stale = Vec::new();
+        for (server_id, old_wid) in candidates {
+            // A window parked on an inactive virtual workspace is discovered and
+            // still alive in the window server, but it sits off-screen and so never
+            // reaches the visible-windows pass that drives `try_adopt_window`. Its
+            // entry is therefore still unclaimed here. If its saved server id still
+            // maps to a live window, adopt it in place; only entries whose window
+            // truly vanished (closed while rift was down) are pruned.
+            if self.adopt_surviving_window(server_id, old_wid) {
+                continue;
+            }
+            self.persistence.adoption.claim(server_id);
+            stale.push(old_wid);
+        }
         self.evict_pruned_windows(stale);
+    }
+
+    /// Adopt an unclaimed restore entry whose window is still alive but was never
+    /// offered to [`try_adopt_window`](Self::try_adopt_window) — the inactive
+    /// virtual-workspace case, where the window is parked off-screen and thus absent
+    /// from the visible-windows discovery pass. Its saved (stable) server id maps to
+    /// the live `WindowId` after a crash restart, so adopt it onto its restored
+    /// space instead of pruning it. Returns whether it was adopted; a window that
+    /// truly vanished (no live server-id mapping) falls through to pruning.
+    ///
+    /// ponytail: exact-id only. After a full reboot server ids change, so an
+    /// inactive-workspace window would still need the fuzzy path — not reachable at
+    /// prune time without a live enumeration. Ceiling: reboot + inactive workspace
+    /// still prunes; upgrade by fuzzy-matching the app's full window list here.
+    fn adopt_surviving_window(&mut self, server_id: WindowServerId, old_wid: WindowId) -> bool {
+        let Some(&live_wid) = self.window_manager.window_ids.get(&server_id) else {
+            return false;
+        };
+        let Some(space) = self
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .space_for_window_any(old_wid)
+        else {
+            return false;
+        };
+        if self.adopt_entry(server_id, old_wid, live_wid, space).is_some() {
+            self.persistence.adopt_exact += 1;
+            self.finish_adoption_if_drained();
+            true
+        } else {
+            false
+        }
     }
 
     /// Global settle backstop: evict every remaining unclaimed entry (dead apps
@@ -824,6 +871,15 @@ mod tests {
     /// adoption/assembly can read its durable window-server id.
     fn register_live(reactor: &mut Reactor, wid: WindowId, server: u32) {
         reactor.window_manager.windows.insert(wid, WindowState::from(win(wid.idx.get(), server)));
+    }
+
+    /// Register a window that is alive in the window server but parked off-screen on
+    /// an inactive virtual workspace: it is tracked (so `window_ids` resolves its
+    /// server id, the "still alive" signal `prune_app_adoptions` consults) but was
+    /// never offered to `try_adopt_window`, mirroring how discovery skips it.
+    fn register_hidden_live(reactor: &mut Reactor, wid: WindowId, server: u32) {
+        register_live(reactor, wid, server);
+        reactor.window_manager.window_ids.insert(WindowServerId::new(server), wid);
     }
 
     /// A single test screen whose synthesized display uuid is `test-display-0`.
@@ -941,23 +997,41 @@ mod tests {
     }
 
     #[test]
-    fn adoption_table_prunes_by_pid_or_bundle_and_drains_the_rest() {
+    fn adoption_table_selects_app_entries_by_pid_or_bundle_without_consuming() {
         let mut windows = HashMap::default();
         windows.insert(WindowId::new(1, 1), identity(101));
         windows.insert(WindowId::new(1, 2), identity(102));
         windows.insert(WindowId::new(2, 1), identity(201));
         let mut table = AdoptionTable::from_windows(windows);
 
-        // Plain restart: pids are stable, so pruning by the launched app's pid
-        // drops its entries (bundle unknown -> `None`).
-        let pruned = sorted(table.prune_app(1, None));
-        assert_eq!(pruned, vec![WindowId::new(1, 1), WindowId::new(1, 2)]);
-        assert_eq!(table.peek(WindowServerId::new(101)), None);
-        assert_eq!(table.peek(WindowServerId::new(201)), Some(WindowId::new(2, 1)));
+        // Plain restart: pids are stable, so selecting by the launched app's pid
+        // returns its entries (bundle unknown -> `None`) as (server_id, old_wid).
+        let mut keys = table.app_entry_keys(1, None);
+        keys.sort_by_key(|(_, wid)| *wid);
+        assert_eq!(
+            keys,
+            vec![
+                (WindowServerId::new(101), WindowId::new(1, 1)),
+                (WindowServerId::new(102), WindowId::new(1, 2)),
+            ]
+        );
+        // Selection does not consume — the entries are still present for the caller
+        // to claim (adopt) or drop per window.
+        assert_eq!(table.peek(WindowServerId::new(101)), Some(WindowId::new(1, 1)));
 
-        // Reboot: the surviving entry's pid (2) matches no live app, but its durable
-        // bundle id does — bundle-keyed pruning still reaps it despite the mismatch.
-        assert_eq!(table.prune_app(999, Some("com.example")), vec![WindowId::new(2, 1)]);
+        // The caller resolves the pid-1 entries (one adopted, one evicted): both are
+        // consumed via `claim`, leaving only the third app's entry.
+        table.claim(WindowServerId::new(101));
+        table.claim(WindowServerId::new(102));
+
+        // Reboot: the survivor's pid (2) matches no live app, but its durable bundle
+        // id does — bundle-keyed selection still finds it despite the pid mismatch.
+        assert_eq!(
+            table.app_entry_keys(999, Some("com.example")),
+            vec![(WindowServerId::new(201), WindowId::new(2, 1))]
+        );
+        // Still non-consuming; `drain_all` takes the remainder.
+        assert_eq!(sorted(table.drain_all()), vec![WindowId::new(2, 1)]);
         assert!(table.is_empty());
     }
 
@@ -1278,6 +1352,104 @@ mod tests {
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
         assert!(vwm.workspace_for_window_any(keep).is_some(), "claimed window kept");
         assert!(vwm.workspace_for_window_any(dead).is_none(), "unreturned window pruned, no zombie");
+    }
+
+    #[test]
+    fn prune_adopts_inactive_workspace_window_that_is_still_alive() {
+        // Reproduces the live bug: a window restored onto an inactive virtual
+        // workspace is parked off-screen, so it never reaches the visible-windows
+        // pass that runs `try_adopt_window`. When its app's discovery completes, the
+        // per-app prune must NOT evict it — its window still exists — but adopt it.
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        reactor.space_manager.screens = one_screen_snapshots(space);
+        let active = WindowId::new(1, 1);
+        let hidden = WindowId::new(1, 2);
+        place_in_engine(&mut reactor, space, &[active, hidden]);
+
+        let mut windows = HashMap::default();
+        windows.insert(active, identity(101));
+        windows.insert(hidden, identity(102));
+        reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+
+        // The active-workspace window surfaces and is adopted the normal way.
+        register_live(&mut reactor, active, 101);
+        let _ = reactor.try_adopt_window(active, space);
+        // The inactive-workspace window is alive (tracked, server id 102 maps to it)
+        // but was never offered to `try_adopt_window`.
+        register_hidden_live(&mut reactor, hidden, 102);
+
+        reactor.prune_app_adoptions(1);
+
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        assert!(vwm.workspace_for_window_any(active).is_some(), "active window kept");
+        assert!(
+            vwm.workspace_for_window_any(hidden).is_some(),
+            "still-alive inactive-workspace window is adopted, not pruned"
+        );
+        assert!(
+            reactor.persistence.adoption.is_empty(),
+            "both entries resolved: the hidden one was claimed by adoption"
+        );
+        assert!(
+            reactor.persistence.settle_deadline.is_none(),
+            "adopting the last survivor drains the table and finalizes the restore"
+        );
+    }
+
+    #[test]
+    fn prune_adopts_inactive_workspace_window_on_a_secondary_display() {
+        // Same survivor, but its restored slot is on the second display's space, so
+        // adoption must resolve the entry's space via the engine, not assume the one
+        // whose app just completed discovery.
+        let s1 = SpaceId::new(1);
+        let s2 = SpaceId::new(2);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        reactor.space_manager.screens = two_screen_snapshots(s1, s2);
+        let hidden = WindowId::new(1, 1);
+        place_in_engine(&mut reactor, s2, &[hidden]);
+
+        let mut windows = HashMap::default();
+        windows.insert(hidden, identity(201));
+        reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+
+        register_hidden_live(&mut reactor, hidden, 201);
+        reactor.prune_app_adoptions(1);
+
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        assert!(
+            vwm.workspace_for_window(s2, hidden).is_some(),
+            "inactive-workspace window on the secondary display survives and stays on its space"
+        );
+        assert!(reactor.persistence.adoption.is_empty(), "the survivor was adopted");
+    }
+
+    #[test]
+    fn settle_timeout_still_evicts_windows_whose_app_never_returned() {
+        // The global backstop: an app that quit while rift was down never fires a
+        // discovery pass, so its entries never reach the per-app prune. The settle
+        // timeout must still evict them (no server-id reprieve — the window is gone).
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        reactor.space_manager.screens = one_screen_snapshots(space);
+        let gone_a = WindowId::new(9, 1);
+        let gone_b = WindowId::new(9, 2);
+        place_in_engine(&mut reactor, space, &[gone_a, gone_b]);
+
+        let mut windows = HashMap::default();
+        windows.insert(gone_a, identity(301));
+        windows.insert(gone_b, identity(302));
+        reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+        assert!(reactor.persistence.settle_deadline.is_some(), "settle timer armed while adopting");
+
+        // Nothing came back and nothing is tracked; the timeout backstop fires.
+        reactor.prune_settled_adoptions();
+
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        assert!(vwm.workspace_for_window_any(gone_a).is_none(), "dead window evicted by timeout");
+        assert!(vwm.workspace_for_window_any(gone_b).is_none(), "dead window evicted by timeout");
+        assert!(reactor.persistence.adoption.is_empty(), "table drained by the settle backstop");
+        assert!(reactor.persistence.settle_deadline.is_none(), "restore finalized once, timer disarmed");
     }
 
     // ---- topmost re-application (P4) ----------------------------------------
