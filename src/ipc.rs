@@ -337,6 +337,11 @@ impl MachHandler {
                 RiftResponse::Success { data: metrics }
             }
 
+            RiftRequest::GetZOrderDebug => {
+                let debug = self.reactor.query_z_order_debug();
+                RiftResponse::Success { data: debug }
+            }
+
             RiftRequest::GetConfig => {
                 match self.perform_config_query(|tx| config_actor::Event::QueryConfig(tx)) {
                     Ok(config) => match serde_json::to_value(&config) {

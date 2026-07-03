@@ -21,8 +21,10 @@ mod testing;
 mod tests;
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use dispatchr::queue;
+use dispatchr::time::Time;
 use events::app::AppEventHandler;
 use events::command::CommandEventHandler;
 use events::drag::DragEventHandler;
@@ -41,7 +43,9 @@ use transaction_manager::TransactionId;
 
 use super::event_tap;
 use super::gesture_tap;
-use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
+use crate::actor::app::{
+    AppInfo, AppThreadHandle, Quiet, RaiseKind, Request, WindowId, WindowInfo, pid_t,
+};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
@@ -52,6 +56,7 @@ use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent}
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::virtual_workspace::AppRuleResult;
+use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
@@ -59,8 +64,26 @@ pub use crate::sys::screen::ScreenInfo;
 use crate::sys::screen::{SpaceId, get_active_space_number, order_visible_spaces_by_position};
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
-    wait_for_native_fullscreen_transition, window_level, window_sub_level,
+    wait_for_native_fullscreen_transition,
 };
+
+fn topmost_sample_points(frame: CGRect) -> [CGPoint; 5] {
+    let min_x = frame.origin.x;
+    let min_y = frame.origin.y;
+    let max_x = frame.origin.x + frame.size.width;
+    let max_y = frame.origin.y + frame.size.height;
+    let mid_x = frame.origin.x + frame.size.width / 2.0;
+    let mid_y = frame.origin.y + frame.size.height / 2.0;
+    let inset_x = (frame.size.width / 4.0).min(24.0);
+    let inset_y = (frame.size.height / 4.0).min(24.0);
+    [
+        CGPoint::new(mid_x, mid_y),
+        CGPoint::new(min_x + inset_x, min_y + inset_y),
+        CGPoint::new(max_x - inset_x, min_y + inset_y),
+        CGPoint::new(min_x + inset_x, max_y - inset_y),
+        CGPoint::new(max_x - inset_x, max_y - inset_y),
+    ]
+}
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
@@ -198,6 +221,7 @@ pub enum Event {
     /// `after`) by the move handler and fires once the window has certainly landed on the target
     /// display, where a forced re-tile is no longer clamped and sticks.
     ReassertDisplayMove(WindowId),
+    ReassertTopmost,
 
     /// Periodic tick: reclaim space from windows that closed without notifying rift
     /// (see [`Reactor::reconcile_orphan_windows`]).
@@ -214,6 +238,10 @@ pub enum Event {
     /// FIXME: This can be interleaved incorrectly with the MouseState in app
     /// actor events.
     MouseUp,
+    /// A mouse button was pressed. Used as an early topmost-reassert trigger:
+    /// the system's click-raise (which can bury a pinned window) happens on
+    /// mouse-down, well before mouse-up.
+    MouseDown,
     /// The mouse cursor moved over a new window. Only sent if focus-follows-
     /// mouse is enabled.
     MouseMovedOverWindow(WindowServerId),
@@ -286,7 +314,25 @@ pub struct Reactor {
     // async) and focus-follows-mouse then steals focus. Holds (window, destination display rect,
     // deadline) and fires once the window's centre is inside that rect or the deadline passes.
     pending_display_move_warp: Option<(WindowId, CGRect, std::time::Instant)>,
+    topmost_windows: HashMap<WindowId, TopmostWindowState>,
+    /// Windows explicitly un-pinned via toggle-topmost while
+    /// `floating_windows_topmost` is on, so the float sweep doesn't re-pin them.
+    topmost_optout: HashSet<WindowId>,
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TopmostWindowState {
+    last_reassert: Option<Instant>,
+    failed_reasserts: u8,
+    /// True when the pin came from `floating_windows_topmost` rather than an
+    /// explicit toggle; implicit pins follow the window's floating state.
+    implicit: bool,
+}
+
+const TOPMOST_REASSERT_DEBOUNCE: Duration = Duration::from_millis(200);
+/// Raise attempts per burial episode: 1 order-only + 2 escalations, then wait
+/// for the next user-driven trigger. Never unpins.
+const TOPMOST_MAX_FAILED_REASSERTS: u8 = 3;
 
 impl Reactor {
     pub fn spawn(
@@ -413,6 +459,8 @@ impl Reactor {
             active_spaces: HashSet::default(),
             display_topology_manager: DisplayTopologyManager::default(),
             pending_display_move_warp: None,
+            topmost_windows: HashMap::default(),
+            topmost_optout: HashSet::default(),
         }
     }
 
@@ -592,7 +640,10 @@ impl Reactor {
             return;
         }
         let on_screen: HashSet<WindowServerId> =
-            window_server::get_visible_windows_with_layer(None).into_iter().map(|i| i.id).collect();
+            window_server::get_visible_windows_with_layer(None)
+                .into_iter()
+                .map(|i| i.id)
+                .collect();
         let mut pids: HashSet<pid_t> = HashSet::default();
         let mut dead_pids: HashSet<pid_t> = HashSet::default();
         for space in self.active_spaces.clone() {
@@ -945,7 +996,9 @@ impl Reactor {
     fn log_event(&self, event: &Event) {
         match event {
             Event::MouseMoved => trace!(?event, "Event"),
-            Event::WindowFrameChanged(..) | Event::MouseUp => trace!(?event, "Event"),
+            Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseDown => {
+                trace!(?event, "Event")
+            }
             _ => debug!(?event, "Event"),
         }
     }
@@ -1065,7 +1118,14 @@ impl Reactor {
         }
 
         let should_update_notifications = Self::should_update_notifications(&event);
-
+        let should_reassert_topmost = matches!(
+            &event,
+            Event::ApplicationActivated(_, _)
+                | Event::ApplicationMainWindowChanged(_, _, _)
+                | Event::MouseMovedOverWindow(_)
+                | Event::MouseUp
+                | Event::MouseDown
+        );
         let main_window_changed = match &event {
             Event::ApplicationMainWindowChanged(_, Some(wid), Quiet::No) => Some(*wid),
             _ => None,
@@ -1187,6 +1247,7 @@ impl Reactor {
             Event::SpaceChanged(spaces) => {
                 SpaceEventHandler::handle_space_changed(self, spaces);
             }
+            Event::MouseDown => {}
             Event::MouseUp => {
                 DragEventHandler::handle_mouse_up(self);
             }
@@ -1212,6 +1273,10 @@ impl Reactor {
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
                 SystemEventHandler::handle_raise_completed(self, window_id, sequence_id);
+                // Any completed raise can change z-order; verify pinned windows
+                // once the dust settles. The reassert counter only resets when a
+                // buried-check comes back clean, not on raise completion.
+                self.schedule_topmost_verification();
             }
             Event::RaiseTimeout { sequence_id } => {
                 SystemEventHandler::handle_raise_timeout(self, sequence_id);
@@ -1224,6 +1289,9 @@ impl Reactor {
             }
             Event::ReassertDisplayMove(window_id) => {
                 CommandEventHandler::handle_reassert_display_move(self, window_id);
+            }
+            Event::ReassertTopmost => {
+                self.reassert_topmost_windows(None);
             }
             Event::ApplicationMainWindowChanged(pid, _, _) => {
                 self.schedule_orphan_reconcile(pid);
@@ -1240,6 +1308,49 @@ impl Reactor {
             window_was_destroyed,
             should_update_notifications,
         );
+        if should_reassert_topmost {
+            self.schedule_topmost_reassert();
+        }
+    }
+
+    /// User-driven trigger (click, app activation, hover): schedules
+    /// verification shots and grants exhausted windows one more raise attempt,
+    /// so a permanently contested window retries once per user action instead
+    /// of looping or giving up forever.
+    fn topmost_feature_active(&self) -> bool {
+        !self.topmost_windows.is_empty() || self.config.settings.floating_windows_topmost
+    }
+
+    fn schedule_topmost_reassert(&mut self) {
+        if !self.topmost_feature_active() {
+            return;
+        }
+        for state in self.topmost_windows.values_mut() {
+            state.failed_reasserts =
+                state.failed_reasserts.min(TOPMOST_MAX_FAILED_REASSERTS - 1);
+        }
+        self.schedule_topmost_verification();
+    }
+
+    /// Trailing re-checks: clicks and raises land asynchronously, so a single
+    /// immediate check races the z-order change it's trying to observe.
+    fn schedule_topmost_verification(&self) {
+        if !self.topmost_feature_active() {
+            return;
+        }
+        let Some(events_tx) = self.communication_manager.events_tx.clone() else {
+            return;
+        };
+        for delay_ms in [60i64, 120, 260, 500] {
+            let events_tx = events_tx.clone();
+            queue::main().after_f_s(
+                Time::new_after(Time::NOW, delay_ms * 1_000_000),
+                events_tx,
+                |events_tx| {
+                    events_tx.send(Event::ReassertTopmost);
+                },
+            );
+        }
     }
 
     fn finalize_event_processing(
@@ -1360,6 +1471,7 @@ impl Reactor {
         Some(WindowData {
             id: window_id,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
+            is_topmost: self.topmost_windows.contains_key(&window_id),
             is_focused: self.main_window() == Some(window_id),
             app_name,
             info: WindowInfo {
@@ -2069,6 +2181,193 @@ impl Reactor {
         }
     }
 
+    pub(crate) fn toggle_topmost_window(&mut self, wid: WindowId) {
+        if self.topmost_windows.remove(&wid).is_some() {
+            // Under floating_windows_topmost the float sweep would re-pin
+            // this window on the next pass; remember the opt-out.
+            if self.config.settings.floating_windows_topmost {
+                self.topmost_optout.insert(wid);
+            }
+            info!(?wid, "Unpinned topmost window");
+            return;
+        }
+
+        self.topmost_optout.remove(&wid);
+        self.topmost_windows.insert(wid, TopmostWindowState::default());
+        info!(?wid, "Pinned topmost window");
+        self.raise_topmost_windows(vec![wid]);
+    }
+
+    /// With `floating_windows_topmost` enabled, every floating window in an
+    /// active workspace is implicitly pinned (unless opted out); implicit pins
+    /// are dropped again when the window stops floating.
+    fn sync_floating_topmost(&mut self) {
+        if !self.config.settings.floating_windows_topmost {
+            return;
+        }
+        self.topmost_optout.retain(|wid| self.window_manager.windows.contains_key(wid));
+
+        let spaces: Vec<SpaceId> = self
+            .space_manager
+            .screens
+            .iter()
+            .filter_map(|screen| screen.space)
+            .filter(|space| self.is_space_active(*space))
+            .collect();
+        let mut floating: HashSet<WindowId> = HashSet::default();
+        for space in spaces {
+            for wid in self.layout_manager.layout_engine.windows_in_active_workspace(space) {
+                if self.layout_manager.layout_engine.is_window_floating(wid) {
+                    floating.insert(wid);
+                }
+            }
+        }
+
+        self.topmost_windows.retain(|wid, state| !state.implicit || floating.contains(wid));
+        for wid in floating {
+            if !self.topmost_optout.contains(&wid) {
+                self.topmost_windows.entry(wid).or_insert(TopmostWindowState {
+                    implicit: true,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    fn reassert_topmost_windows(&mut self, except: Option<WindowId>) {
+        if self.display_topology_manager.is_churning_or_awaiting_commit()
+            || !matches!(
+                self.workspace_switch_manager.workspace_switch_state,
+                WorkspaceSwitchState::Inactive
+            )
+        {
+            return;
+        }
+
+        self.sync_floating_topmost();
+
+        let now = Instant::now();
+        let candidates: Vec<WindowId> = self.topmost_windows.keys().copied().collect();
+        let mut order_only = Vec::new();
+
+        for wid in candidates {
+            if Some(wid) == except || !self.is_window_on_active_space(wid) {
+                continue;
+            }
+            let Some(state) = self.topmost_windows.get(&wid).copied() else {
+                continue;
+            };
+            if state
+                .last_reassert
+                .is_some_and(|last| now.duration_since(last) < TOPMOST_REASSERT_DEBOUNCE)
+            {
+                continue;
+            }
+            let Some(burier) = self.topmost_burier(wid) else {
+                if let Some(state) = self.topmost_windows.get_mut(&wid) {
+                    if state.failed_reasserts != 0 {
+                        info!(
+                            ?wid,
+                            after_attempts = state.failed_reasserts,
+                            "Topmost window surfaced; resetting reassert counter"
+                        );
+                    }
+                    state.failed_reasserts = 0;
+                }
+                continue;
+            };
+            // The focused window is allowed to cover the pin while it holds
+            // focus: no public macOS API can order another app's window above
+            // the active app's key window without stealing focus (that needs
+            // SLSSetWindowLevel, i.e. a SIP-disabled scripting addition).
+            // Fighting it reactively just produces flicker. When focus moves
+            // on, the next trigger re-raises the pin above it.
+            let burier_wid = self.window_manager.window_ids.get(&burier).copied();
+            if burier_wid.is_some() && burier_wid == self.main_window() {
+                if let Some(state) = self.topmost_windows.get_mut(&wid) {
+                    state.failed_reasserts = 0;
+                }
+                continue;
+            }
+            if state.failed_reasserts >= TOPMOST_MAX_FAILED_REASSERTS {
+                // Never unpin. Stop raising until the next user-driven trigger
+                // (schedule_topmost_reassert) grants another attempt.
+                debug!(?wid, "Topmost reassert attempts exhausted; awaiting next trigger");
+                continue;
+            }
+
+            if let Some(s) = self.topmost_windows.get_mut(&wid) {
+                s.last_reassert = Some(now);
+                s.failed_reasserts += 1;
+            }
+            info!(
+                ?wid,
+                attempts = state.failed_reasserts,
+                burier = burier.as_u32(),
+                "Topmost window buried by unfocused window; sending order-only raise"
+            );
+            order_only.push(wid);
+        }
+
+        self.raise_topmost_windows(order_only);
+    }
+
+    fn raise_topmost_windows(&mut self, windows: Vec<WindowId>) {
+        if windows.is_empty() {
+            return;
+        }
+
+        let mut app_handles = HashMap::default();
+        let raise_windows: Vec<Vec<WindowId>> = windows
+            .into_iter()
+            .filter(|wid| {
+                self.insert_app_handle_for_window(&mut app_handles, *wid);
+                app_handles.contains_key(&wid.pid)
+            })
+            .map(|wid| vec![wid])
+            .collect();
+        if raise_windows.is_empty() {
+            return;
+        }
+
+        let msg = raise_manager::Event::RaiseRequest(RaiseRequest {
+            raise_windows,
+            focus_window: None,
+            app_handles,
+            focus_quiet: Quiet::Yes,
+            kind: RaiseKind::OrderOnly,
+        });
+        if let Err(e) = self.communication_manager.raise_manager_tx.try_send(msg) {
+            warn!("Failed to send order-only topmost raise request: {}", e);
+        }
+    }
+
+    /// Returns the window-server id of the first non-topmost window found
+    /// covering one of the pinned window's sample points, or `None` if the
+    /// pinned window is on top.
+    fn topmost_burier(&self, wid: WindowId) -> Option<WindowServerId> {
+        let window = self.window_manager.windows.get(&wid)?;
+        let wsid = window.info.sys_id?;
+        if !self.window_manager.visible_windows.contains(&wsid) {
+            return None;
+        }
+
+        let frame = window_server::get_window(wsid)
+            .map(|info| info.frame)
+            .unwrap_or(window.info.frame);
+        let points = topmost_sample_points(frame);
+
+        points.iter().find_map(|point| {
+            let hit = window_server::get_window_at_point(*point)?;
+            (hit != wsid
+                && !self.topmost_windows.keys().any(|topmost| {
+                    self.window_manager.windows.get(topmost).and_then(|state| state.info.sys_id)
+                        == Some(hit)
+                }))
+            .then_some(hit)
+        })
+    }
+
     fn expose_all_spaces(&mut self) {
         let spaces: Vec<SpaceId> = self
             .space_manager
@@ -2144,6 +2443,10 @@ impl Reactor {
             return false;
         }
 
+        if self.topmost_windows.contains_key(&wid) {
+            return false;
+        }
+
         // Float-aware FFM: when enabled, hovering a floating window never focuses/raises it.
         // Floats are reached by click or alt-tab; this stops mouse sweeps from focus-thrashing
         // through overlapping floats under default_floating (whitelist) mode.
@@ -2176,93 +2479,6 @@ impl Reactor {
         if !self.layout_manager.layout_engine.is_window_in_active_workspace(space, wid) {
             trace!("Ignoring mouse over window {:?} - not in active workspace", wid);
             return false;
-        }
-
-        let Some(candidate_wsid) = window.info.sys_id else {
-            return true;
-        };
-
-        // FFM occlusion cache: the z-order list and per-window level queries below are synchronous
-        // WindowServer round-trips on the reactor's serial thread, and this gate runs on EVERY window
-        // crossing. The ffm-perf probe measured them at 10–148 ms per call during a fast multi-display
-        // sweep — the reactor fell behind the cursor and window_focused emits trailed by 100–500 ms (the
-        // "border lags the mouse" jank). Z-order/levels don't change at mouse-sweep timescales, so a
-        // short-TTL cache makes repeat crossings free while a real occlusion change is picked up within
-        // ~100 ms (one TTL). Reactor is single-threaded → thread_local is safe and lock-free.
-        use std::cell::RefCell;
-        use std::time::Instant;
-        type NSWindowLevelT = objc2_app_kit::NSWindowLevel;
-        const OCCLUSION_TTL: Duration = Duration::from_millis(100);
-        thread_local! {
-            static ZORDER_CACHE: RefCell<HashMap<u64, (Instant, Vec<u32>)>> =
-                RefCell::new(HashMap::default());
-            static LEVEL_CACHE: RefCell<HashMap<u32, (Instant, Option<NSWindowLevelT>, i32)>> =
-                RefCell::new(HashMap::default());
-        }
-        fn cached_zorder(space_id: u64) -> Vec<u32> {
-            ZORDER_CACHE.with(|c| {
-                let mut cache = c.borrow_mut();
-                let now = Instant::now();
-                match cache.get(&space_id) {
-                    Some((at, order)) if at.elapsed() < OCCLUSION_TTL => order.clone(),
-                    _ => {
-                        let order = crate::sys::window_server::space_window_list_for_connection(
-                            &[space_id],
-                            0,
-                            false,
-                        );
-                        cache.insert(space_id, (now, order.clone()));
-                        order
-                    }
-                }
-            })
-        }
-        fn cached_levels(wid: u32) -> (Option<NSWindowLevelT>, i32) {
-            LEVEL_CACHE.with(|c| {
-                let mut cache = c.borrow_mut();
-                let now = Instant::now();
-                match cache.get(&wid) {
-                    Some((at, level, sub)) if at.elapsed() < OCCLUSION_TTL => (*level, *sub),
-                    _ => {
-                        let level = window_level(wid);
-                        let sub = window_sub_level(wid);
-                        cache.insert(wid, (now, level, sub));
-                        (level, sub)
-                    }
-                }
-            })
-        }
-
-        let order = cached_zorder(space.get());
-        let candidate_u32 = candidate_wsid.as_u32();
-        let (candidate_level, candidate_sub_level) = cached_levels(candidate_u32);
-
-        for above_u32 in order {
-            if above_u32 == candidate_u32 {
-                break;
-            }
-
-            let above_wsid = WindowServerId::new(above_u32);
-            let Some(&above_wid) = self.window_manager.window_ids.get(&above_wsid) else {
-                continue;
-            };
-
-            let Some(above_state) = self.window_manager.windows.get(&above_wid) else {
-                continue;
-            };
-            let above_frame = above_state.frame_monotonic;
-            if candidate_frame.intersection(&above_frame).area() <= 64.0 {
-                continue;
-            }
-
-            let (above_level, above_sub_level) = cached_levels(above_u32);
-            if candidate_level
-                .zip(above_level)
-                .is_some_and(|(candidate, above)| candidate == above)
-                && candidate_sub_level == above_sub_level
-            {
-                return false;
-            }
         }
 
         true
@@ -2796,6 +3012,7 @@ impl Reactor {
             focus_window: focus_window_with_warp,
             app_handles,
             focus_quiet,
+            kind: crate::actor::app::RaiseKind::Focus,
         });
 
         if let Err(e) = self.communication_manager.raise_manager_tx.try_send(msg) {
@@ -3054,6 +3271,7 @@ impl Reactor {
                 focus_window: Some((wid, warp)),
                 app_handles,
                 focus_quiet: quiet,
+                kind: crate::actor::app::RaiseKind::Focus,
             }));
     }
 
@@ -3403,4 +3621,3 @@ impl Reactor {
         })
     }
 }
-

@@ -24,6 +24,7 @@ pub enum RiftRequest {
     },
     GetApplications,
     GetMetrics,
+    GetZOrderDebug,
     GetConfig,
     ExecuteCommand {
         command: String,

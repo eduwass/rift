@@ -105,6 +105,7 @@ impl WindowEventHandler {
         } else {
             debug!(?wid, "Received WindowDestroyed for unknown window - ignoring");
         }
+        reactor.topmost_windows.remove(&wid);
         reactor.window_manager.windows.remove(&wid);
         reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
 
@@ -143,6 +144,7 @@ impl WindowEventHandler {
             if let Some(ws_id) = window.info.sys_id {
                 reactor.window_manager.visible_windows.remove(&ws_id);
             }
+            reactor.topmost_windows.remove(&wid);
             reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
         } else {
             debug!(?wid, "Received WindowMinimized for unknown window - ignoring");
@@ -284,7 +286,6 @@ impl WindowEventHandler {
                     }
                 }
 
-
                 return false;
             }
 
@@ -323,7 +324,6 @@ impl WindowEventHandler {
                 }
                 window.frame_monotonic = new_frame;
             }
-
 
             let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
 

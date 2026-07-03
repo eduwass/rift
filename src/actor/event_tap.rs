@@ -469,13 +469,19 @@ impl EventTap {
                 should_rebuild_mask = true;
             }
             Request::SetFocusFollowsMouseEnabled(enabled) => {
-                debug!(
-                    "focus_follows_mouse temporarily {}",
-                    if enabled { "enabled" } else { "disabled" }
-                );
-                state.focus_follows_mouse_enabled = enabled;
-                state.reset(enabled);
-                should_rebuild_mask = true;
+                // Redundant sets arrive on every app activation (menu-state
+                // bookkeeping). Resetting hover state on a no-op toggle makes
+                // the next mouse move count as a fresh hover and re-raise the
+                // window under the cursor — which fights topmost escalations.
+                if state.focus_follows_mouse_enabled != enabled {
+                    debug!(
+                        "focus_follows_mouse temporarily {}",
+                        if enabled { "enabled" } else { "disabled" }
+                    );
+                    state.focus_follows_mouse_enabled = enabled;
+                    state.reset(enabled);
+                    should_rebuild_mask = true;
+                }
             }
             Request::SetHotkeys(bindings) => {
                 *self.hotkey_specs.borrow_mut() = bindings;
@@ -648,6 +654,11 @@ impl EventTap {
             state.hidden = false;
         }
         match event_type {
+            CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
+                // Early topmost-reassert trigger: the system's click-raise
+                // happens on mouse-down, before mouse-up arrives.
+                _ = self.events_tx.send(Event::MouseDown);
+            }
             CGEventType::RightMouseUp | CGEventType::LeftMouseUp => {
                 _ = self.events_tx.send(Event::MouseUp);
             }

@@ -8,7 +8,6 @@ use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{
     Command, DisplaySelector, Event, Reactor, ReactorCommand, WorkspaceSwitchOrigin,
 };
-use crate::sys::dispatch::DispatchExt;
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{menu_bar, raise_manager};
@@ -16,6 +15,7 @@ use crate::common::collections::HashMap;
 use crate::common::config::{self as config, Config};
 use crate::common::log::{MetricsCommand, handle_command};
 use crate::layout_engine::{EventResponse, LayoutCommand, LayoutEvent};
+use crate::sys::dispatch::DispatchExt;
 use crate::sys::window_server::{self as window_server, WindowServerId};
 
 pub struct CommandEventHandler;
@@ -235,6 +235,9 @@ impl CommandEventHandler {
             ReactorCommand::CloseWindow { window_server_id } => {
                 Self::handle_command_reactor_close_window(reactor, window_server_id);
             }
+            ReactorCommand::ToggleTopmostWindow => {
+                Self::handle_command_reactor_toggle_topmost_window(reactor);
+            }
             ReactorCommand::MoveWindowToDisplay { selector, window_id } => {
                 Self::handle_command_reactor_move_window_to_display(reactor, &selector, window_id);
             }
@@ -308,6 +311,7 @@ impl CommandEventHandler {
                 focus_window: Some((window_id, None)),
                 app_handles,
                 focus_quiet: Quiet::No,
+                kind: crate::actor::app::RaiseKind::Focus,
             });
             if let Err(e) = reactor.communication_manager.raise_manager_tx.try_send(request) {
                 warn!("Failed to send raise request: {}", e);
@@ -335,6 +339,42 @@ impl CommandEventHandler {
             }
         }
         false
+    }
+
+    pub fn handle_command_reactor_toggle_topmost_window(reactor: &mut Reactor) {
+        let focused = reactor
+            .layout_manager
+            .layout_engine
+            .focused_window()
+            .or_else(|| reactor.main_window());
+        let cursor_floating = reactor.window_id_under_cursor().filter(|wid| {
+            reactor.layout_manager.layout_engine.is_window_floating(*wid)
+        });
+        let only_floating = reactor.workspace_command_space().and_then(|space| {
+            let floating: Vec<_> = reactor
+                .layout_manager
+                .layout_engine
+                .windows_in_active_workspace(space)
+                .into_iter()
+                .filter(|wid| reactor.layout_manager.layout_engine.is_window_floating(*wid))
+                .collect();
+            (floating.len() == 1).then_some(floating[0])
+        });
+        let window_id = focused
+            .filter(|wid| reactor.layout_manager.layout_engine.is_window_floating(*wid))
+            .or(cursor_floating)
+            .or(only_floating)
+            .or(focused);
+        let Some(window_id) = window_id else {
+            warn!("Toggle topmost ignored: no focused, hovered, or floating window");
+            return;
+        };
+        if !reactor.window_manager.windows.contains_key(&window_id) {
+            warn!(?window_id, "Toggle topmost ignored: unknown window");
+            return;
+        }
+
+        reactor.toggle_topmost_window(window_id);
     }
 
     pub fn handle_command_reactor_move_mouse_to_display(
@@ -547,6 +587,7 @@ impl CommandEventHandler {
             focus_window: Some((window_id, None)),
             app_handles,
             focus_quiet: Quiet::No,
+            kind: crate::actor::app::RaiseKind::Focus,
         });
         if let Err(e) = reactor.communication_manager.raise_manager_tx.try_send(raise_request) {
             warn!("Failed to send raise request after display move: {}", e);

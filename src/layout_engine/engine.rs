@@ -2136,6 +2136,10 @@ impl LayoutEngine {
         ron::ser::to_string(&self).unwrap()
     }
 
+    pub fn focused_window(&self) -> Option<WindowId> {
+        self.focused_window
+    }
+
     #[cfg(test)]
     pub(crate) fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
         let (ws_id, layout) = self.workspace_and_layout(space)?;

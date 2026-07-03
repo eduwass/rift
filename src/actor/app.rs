@@ -227,10 +227,16 @@ pub enum Request {
     /// Events attributed to this request will use the provided [`Quiet`]
     /// parameter for the last window only. Events for other windows will be
     /// marked `Quiet::Yes` automatically.
-    Raise(Vec<WindowId>, CancellationToken, u64, Quiet),
+    Raise(Vec<WindowId>, CancellationToken, u64, Quiet, RaiseKind),
 }
 
-struct RaiseRequest(Vec<WindowId>, CancellationToken, u64, Quiet);
+struct RaiseRequest(Vec<WindowId>, CancellationToken, u64, Quiet, RaiseKind);
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RaiseKind {
+    Focus,
+    OrderOnly,
+}
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Quiet {
@@ -390,11 +396,20 @@ impl State {
 
     async fn handle_raises(this: &RefCell<Self>, mut rx: actor::Receiver<RaiseRequest>) {
         while let Some((span, raise)) = rx.recv().await {
-            let RaiseRequest(wids, token, sequence_id, quiet) = raise;
-            if let Err(e) = Self::handle_raise_request(this, wids, &token, sequence_id, quiet)
-                .instrument(span)
-                .await
-            {
+            let RaiseRequest(wids, token, sequence_id, quiet, kind) = raise;
+            let result = match kind {
+                RaiseKind::Focus => {
+                    Self::handle_raise_request(this, wids, &token, sequence_id, quiet)
+                        .instrument(span)
+                        .await
+                }
+                RaiseKind::OrderOnly => {
+                    Self::handle_order_only_raise_request(this, wids, &token, sequence_id)
+                        .instrument(span)
+                        .await
+                }
+            };
+            if let Err(e) = result {
                 debug!("Raise request failed: {e:?}");
             }
         }
@@ -733,9 +748,9 @@ impl State {
                 ));
                 SLSReenableUpdate(*G_CONNECTION);
             }
-            &mut Request::Raise(ref wids, ref token, sequence_id, quiet) => {
+            &mut Request::Raise(ref wids, ref token, sequence_id, quiet, kind) => {
                 self.raises_tx
-                    .send(RaiseRequest(wids.clone(), token.clone(), sequence_id, quiet));
+                    .send(RaiseRequest(wids.clone(), token.clone(), sequence_id, quiet, kind));
             }
         }
         Ok(false)
@@ -877,6 +892,33 @@ impl From<AxError> for RaiseError {
 }
 
 impl State {
+    async fn handle_order_only_raise_request(
+        this_ref: &RefCell<Self>,
+        wids: Vec<WindowId>,
+        token: &CancellationToken,
+        sequence_id: u64,
+    ) -> Result<(), RaiseError> {
+        if token.is_cancelled() {
+            return Err(RaiseError::RaiseCancelled);
+        }
+
+        let this = this_ref.borrow_mut();
+        for &wid in &wids {
+            if token.is_cancelled() {
+                return Err(RaiseError::RaiseCancelled);
+            }
+            debug_assert_eq!(wid.pid, this.pid);
+            let window = this.window(wid)?;
+            let result = trace("order_only_raise", &window.elem, || window.elem.raise());
+            if let Err(err) = result {
+                warn!(?wid, ?err, "order-only raise (AXRaise) failed");
+            }
+            this.send_event(Event::RaiseCompleted { window_id: wid, sequence_id });
+        }
+
+        Ok(())
+    }
+
     async fn handle_raise_request(
         this_ref: &RefCell<Self>,
         wids: Vec<WindowId>,

@@ -5,7 +5,7 @@ use objc2_core_foundation::CGPoint;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
-use crate::actor::app::{AppThreadHandle, Quiet, Request, WindowId};
+use crate::actor::app::{AppThreadHandle, Quiet, RaiseKind, Request, WindowId};
 use crate::actor::{self, event_tap, reactor};
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::pid_t;
@@ -34,6 +34,7 @@ pub struct RaiseRequest {
     pub focus_window: Option<(WindowId, Option<CGPoint>)>,
     pub app_handles: HashMap<i32, AppThreadHandle>,
     pub focus_quiet: Quiet,
+    pub kind: RaiseKind,
 }
 
 pub struct RaiseManager {
@@ -131,6 +132,7 @@ impl RaiseManager {
                 focus_window,
                 app_handles,
                 focus_quiet,
+                kind,
             }) => {
                 debug!(
                     "Processing layout response with {} raise_windows",
@@ -143,6 +145,7 @@ impl RaiseManager {
                     focus_window,
                     app_handles,
                     focus_quiet,
+                    kind,
                 });
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
@@ -211,6 +214,7 @@ impl RaiseManager {
             focus_window,
             app_handles,
             focus_quiet,
+            kind,
         }: RaiseRequest,
     ) {
         let sequence_id = self.next_sequence_id;
@@ -246,6 +250,7 @@ impl RaiseManager {
                     raise_token.clone(),
                     sequence_id,
                     Quiet::Yes,
+                    kind,
                 ))
                 .is_ok()
             {
@@ -293,6 +298,7 @@ impl RaiseManager {
                         sequence.raise_token.clone(),
                         sequence.sequence_id, // Use proper sequence ID for tracking
                         quiet,
+                        RaiseKind::Focus,
                     ))
                     .is_ok()
                 {
@@ -354,6 +360,7 @@ mod tests {
             focus_window,
             app_handles,
             focus_quiet,
+            kind: RaiseKind::Focus,
         })
     }
 
@@ -372,10 +379,11 @@ mod tests {
         expected_seq_id: u64,
         expected_quiet: Quiet,
     ) {
-        if let Request::Raise(wid, _, seq_id, quiet) = request {
+        if let Request::Raise(wid, _, seq_id, quiet, kind) = request {
             assert_eq!(*wid, vec![expected_wid]);
             assert_eq!(*seq_id, expected_seq_id);
             assert_eq!(*quiet, expected_quiet);
+            assert_eq!(*kind, RaiseKind::Focus);
         } else {
             panic!("Expected raise request, got: {:?}", request);
         }
@@ -383,8 +391,8 @@ mod tests {
 
     fn find_raise_request(requests: &[Request], expected_wid: WindowId) -> bool {
         requests.iter().any(|r| {
-            if let Request::Raise(wid, _, _, quiet) = r {
-                *wid == vec![expected_wid] && *quiet == Quiet::No
+            if let Request::Raise(wid, _, _, quiet, kind) = r {
+                *wid == vec![expected_wid] && *quiet == Quiet::No && *kind == RaiseKind::Focus
             } else {
                 false
             }
@@ -412,6 +420,32 @@ mod tests {
             assert_eq!(sequence.sequence_id, 1);
             assert_eq!(sequence.pending_raises.len(), 2);
             assert!(sequence.focus_batch.is_some());
+        });
+    }
+
+    #[test]
+    fn order_only_raise_never_sends_focus_capable_raise() {
+        Executor::run(async {
+            let mut raise_manager = RaiseManager::new();
+            let (app_handles, mut app_rx) = create_test_app_handles();
+
+            raise_manager.handle_message(Event::RaiseRequest(RaiseRequest {
+                raise_windows: vec![vec![WindowId::new(1, 1)]],
+                focus_window: None,
+                app_handles,
+                focus_quiet: Quiet::Yes,
+                kind: RaiseKind::OrderOnly,
+            }));
+
+            let requests = collect_requests(&mut app_rx);
+            assert_eq!(requests.len(), 1);
+            let Request::Raise(wids, _, seq_id, quiet, kind) = &requests[0] else {
+                panic!("Expected raise request, got: {:?}", requests[0]);
+            };
+            assert_eq!(*wids, vec![WindowId::new(1, 1)]);
+            assert_eq!(*seq_id, 1);
+            assert_eq!(*quiet, Quiet::Yes);
+            assert_eq!(*kind, RaiseKind::OrderOnly);
         });
     }
 
@@ -759,8 +793,11 @@ mod tests {
             // wouldn't have a chance to send its focus request
             let requests = collect_requests(&mut app_rx);
             let second_focus_sent = requests.iter().any(|r| {
-                if let Request::Raise(wid, _, seq_id, quiet) = r {
-                    *wid == vec![WindowId::new(1, 3)] && *seq_id == 2 && *quiet == Quiet::No
+                if let Request::Raise(wid, _, seq_id, quiet, kind) = r {
+                    *wid == vec![WindowId::new(1, 3)]
+                        && *seq_id == 2
+                        && *quiet == Quiet::No
+                        && *kind == RaiseKind::Focus
                 } else {
                     false
                 }
@@ -799,6 +836,7 @@ mod tests {
                 focus_window: Some((WindowId::new(1, 7), None)),
                 app_handles,
                 focus_quiet: Quiet::No,
+                kind: RaiseKind::Focus,
             });
 
             // Handle the batched raise request
@@ -808,17 +846,19 @@ mod tests {
             let requests = collect_requests(&mut app_rx);
 
             // Verify second and third batches are processed first.
-            if let Request::Raise(wids, _, seq_id, quiet) = &requests[0] {
+            if let Request::Raise(wids, _, seq_id, quiet, kind) = &requests[0] {
                 assert_eq!(*wids, vec![WindowId::new(1, 3), WindowId::new(1, 4)]);
                 assert_eq!(*seq_id, 1);
                 assert_eq!(*quiet, Quiet::Yes);
+                assert_eq!(*kind, RaiseKind::Focus);
             } else {
                 panic!("Expected Raise request for second batch");
             }
-            if let Request::Raise(wids, _, seq_id, quiet) = &requests[1] {
+            if let Request::Raise(wids, _, seq_id, quiet, kind) = &requests[1] {
                 assert_eq!(*wids, vec![WindowId::new(1, 5), WindowId::new(1, 6)]);
                 assert_eq!(*seq_id, 1);
                 assert_eq!(*quiet, Quiet::Yes);
+                assert_eq!(*kind, RaiseKind::Focus);
             } else {
                 panic!("Expected Raise request for third batch");
             }
@@ -841,7 +881,7 @@ mod tests {
             // Verify first batch is processed last.
             // The focus_window should have been moved to the end.
             assert_eq!(requests.len(), 1);
-            if let Request::Raise(wids, _, seq_id, quiet) = &requests[0] {
+            if let Request::Raise(wids, _, seq_id, quiet, kind) = &requests[0] {
                 assert_eq!(
                     *wids,
                     vec![
@@ -852,6 +892,7 @@ mod tests {
                 );
                 assert_eq!(*seq_id, 1);
                 assert_eq!(*quiet, Quiet::No);
+                assert_eq!(*kind, RaiseKind::Focus);
             } else {
                 panic!("Expected Raise request for first batch");
             }

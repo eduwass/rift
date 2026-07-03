@@ -85,6 +85,8 @@ enum QueryCommands {
     },
     /// Get performance metrics
     Metrics,
+    /// Dump window-server z-order/level diagnostics
+    ZOrderDebug,
 }
 
 #[derive(Subcommand)]
@@ -143,6 +145,8 @@ enum WindowCommands {
     },
     /// Toggle window floating state
     ToggleFloat,
+    /// Toggle whether the focused window stays above normal windows
+    ToggleTopmost,
     /// Toggle fullscreen mode (fills the whole screen, ignores outer gaps)
     ToggleFullscreen,
     /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
@@ -486,6 +490,7 @@ fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
             Ok(RiftRequest::GetWorkspaceLayouts { space_id, workspace_id })
         }
         QueryCommands::Metrics => Ok(RiftRequest::GetMetrics),
+        QueryCommands::ZOrderDebug => Ok(RiftRequest::GetZOrderDebug),
     }
 }
 
@@ -566,6 +571,9 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         ))),
         WindowCommands::ToggleFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleWindowFloating,
+        ))),
+        WindowCommands::ToggleTopmost => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::ToggleTopmostWindow,
         ))),
         WindowCommands::ToggleFullscreen => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleFullscreen,

@@ -1,6 +1,6 @@
 use std::sync::mpsc::{RecvError, SyncSender, sync_channel};
 
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect};
 
 use crate::actor::app::WindowId;
 use crate::actor::menu_bar;
@@ -81,6 +81,11 @@ impl ReactorQueryHandle {
     pub fn query_metrics(&self) -> serde_json::Value {
         self.send_query(QueryRequest::Metrics).unwrap_or_else(|_| serde_json::json!({}))
     }
+
+    pub fn query_z_order_debug(&self) -> serde_json::Value {
+        self.send_query(QueryRequest::ZOrderDebug)
+            .unwrap_or_else(|_| serde_json::json!({}))
+    }
 }
 
 #[derive(Debug)]
@@ -113,9 +118,19 @@ pub enum QueryRequest {
         resp: SyncSender<Option<LayoutStateData>>,
     },
     Metrics(SyncSender<serde_json::Value>),
+    ZOrderDebug(SyncSender<serde_json::Value>),
 }
 
 impl Reactor {
+    fn debug_rect_json(rect: CGRect) -> serde_json::Value {
+        serde_json::json!({
+            "x": rect.origin.x,
+            "y": rect.origin.y,
+            "w": rect.size.width,
+            "h": rect.size.height,
+        })
+    }
+
     pub(super) fn handle_query_request(&mut self, req: QueryRequest) {
         match req {
             QueryRequest::Workspaces { space_id, resp } => {
@@ -144,6 +159,9 @@ impl Reactor {
             }
             QueryRequest::Metrics(resp) => {
                 let _ = resp.send(self.query_metrics());
+            }
+            QueryRequest::ZOrderDebug(resp) => {
+                let _ = resp.send(self.query_z_order_debug());
             }
         }
     }
@@ -192,6 +210,10 @@ impl Reactor {
 
     pub fn query_metrics(&self) -> serde_json::Value {
         self.handle_metrics_query()
+    }
+
+    pub fn query_z_order_debug(&self) -> serde_json::Value {
+        self.handle_z_order_debug_query()
     }
 
     pub(super) fn maybe_send_menu_update(&mut self) {
@@ -523,6 +545,83 @@ impl Reactor {
             "applications": self.app_manager.apps.len(),
             "screens": self.space_manager.screens.len(),
             "workspace_stats": workspace_stats,
+        })
+    }
+
+    fn handle_z_order_debug_query(&self) -> serde_json::Value {
+        let visible: Vec<_> = crate::sys::window_server::get_visible_windows_with_layer(None)
+            .into_iter()
+            .take(80)
+            .map(|info| {
+                let rift_window_id = self.window_manager.window_ids.get(&info.id);
+                let managed_window =
+                    rift_window_id.and_then(|wid| self.window_manager.windows.get(wid));
+                serde_json::json!({
+                    "window_server_id": info.id.as_u32(),
+                    "pid": info.pid,
+                    "layer": info.layer,
+                    "frame": Self::debug_rect_json(info.frame),
+                    "level": crate::sys::window_server::window_level(info.id.as_u32()),
+                    "sublevel": crate::sys::window_server::window_sub_level(info.id.as_u32()),
+                    "rift_window_id": rift_window_id.map(|wid| wid.to_debug_string()),
+                    "managed_app": managed_window.and_then(|window| window.info.bundle_id.clone()),
+                    "managed_title": managed_window.map(|window| window.info.title.clone()),
+                })
+            })
+            .collect();
+
+        let topmost: Vec<_> = self
+            .topmost_windows
+            .keys()
+            .filter_map(|wid| {
+                let window = self.window_manager.windows.get(wid)?;
+                let wsid = window.info.sys_id?;
+                let frame = crate::sys::window_server::get_window(wsid)
+                    .map(|info| info.frame)
+                    .unwrap_or(window.info.frame);
+                let sample_points = [
+                    ("center", CGPoint::new(frame.origin.x + frame.size.width / 2.0, frame.origin.y + frame.size.height / 2.0)),
+                    ("left", CGPoint::new(frame.origin.x + 24.0, frame.origin.y + frame.size.height / 2.0)),
+                    ("right", CGPoint::new(frame.origin.x + frame.size.width - 24.0, frame.origin.y + frame.size.height / 2.0)),
+                ];
+                let hits: Vec<_> = sample_points
+                    .into_iter()
+                    .map(|(name, point)| {
+                        serde_json::json!({
+                            "name": name,
+                            "point": { "x": point.x, "y": point.y },
+                            "hit_window_server_id": crate::sys::window_server::get_window_at_point(point).map(|id| id.as_u32()),
+                        })
+                    })
+                    .collect();
+                let associated: Vec<_> = crate::sys::window_server::associated_windows(wsid)
+                    .into_iter()
+                    .map(|id| {
+                        serde_json::json!({
+                            "window_server_id": id.as_u32(),
+                            "level": crate::sys::window_server::window_level(id.as_u32()),
+                            "sublevel": crate::sys::window_server::window_sub_level(id.as_u32()),
+                            "info": crate::sys::window_server::get_window(id),
+                        })
+                    })
+                    .collect();
+                Some(serde_json::json!({
+                    "rift_window_id": wid.to_debug_string(),
+                    "window_server_id": wsid.as_u32(),
+                    "bundle_id": window.info.bundle_id,
+                    "title": window.info.title,
+                    "frame": Self::debug_rect_json(frame),
+                    "level": crate::sys::window_server::window_level(wsid.as_u32()),
+                    "sublevel": crate::sys::window_server::window_sub_level(wsid.as_u32()),
+                    "associated_windows": associated,
+                    "hit_tests": hits,
+                }))
+            })
+            .collect();
+
+        serde_json::json!({
+            "topmost_windows": topmost,
+            "visible_order_front_to_back_first_80": visible,
         })
     }
 

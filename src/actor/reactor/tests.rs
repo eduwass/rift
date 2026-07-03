@@ -10,6 +10,18 @@ use crate::sys::app::WindowInfo;
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn topmost_sample_points_stay_inside_the_actual_window_server_frame() {
+    let points =
+        topmost_sample_points(CGRect::new(CGPoint::new(100., 200.), CGSize::new(300., 400.)));
+
+    assert_eq!(points[0], CGPoint::new(250., 400.));
+    assert_eq!(points[1], CGPoint::new(124., 224.));
+    assert_eq!(points[2], CGPoint::new(376., 224.));
+    assert_eq!(points[3], CGPoint::new(124., 576.));
+    assert_eq!(points[4], CGPoint::new(376., 576.));
+}
+
+#[test]
 fn it_ignores_stale_resize_events() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
