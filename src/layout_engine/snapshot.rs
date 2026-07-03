@@ -90,6 +90,8 @@ impl Snapshot {
                 return Snapshot::default();
             }
         };
+        // The whole file is one ron document, so a single corrupt arrangement
+        // fails the parse and discards every arrangement — accepted by design.
         match ron::from_str::<Snapshot>(&contents) {
             Ok(snapshot) if snapshot.version == SNAPSHOT_VERSION => snapshot,
             Ok(snapshot) => {

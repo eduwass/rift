@@ -269,6 +269,11 @@ impl Reactor {
     /// arrangement in the file untouched. Used by the debounced flush (current
     /// fingerprint) and by the pre-switch save (the arrangement being left).
     fn flush_snapshot_under(&mut self, fingerprint: &str) {
+        // An all-displays blackout produces an empty fingerprint; never stamp an
+        // arrangement under "" — it would shadow every real display set.
+        if fingerprint.is_empty() {
+            return;
+        }
         let Some(path) = self.persistence.restore_path.clone() else {
             return;
         };
@@ -539,6 +544,20 @@ impl Reactor {
             })
             .collect();
 
+        // `remap_space` overwrites its target, so a shift where the saved and live
+        // id sets overlap (e.g. saved {1,2} → live {2,3}) would let one remap
+        // clobber another saved space's state before it is migrated. Resolve every
+        // pair first, then apply in two passes: park each saved space on a unique
+        // scratch id beyond every id in play, then move the scratch ids onto the
+        // live targets.
+        let scratch_base = live
+            .iter()
+            .map(|(_, _, s)| s.get())
+            .chain(self.persistence.saved_spaces.keys().map(|s| s.get()))
+            .max()
+            .unwrap_or(0);
+
+        let mut pairs: Vec<(SpaceId, SpaceId)> = Vec::new();
         for (uuid, ordinal, live_space) in live {
             let matched = self
                 .persistence
@@ -549,9 +568,18 @@ impl Reactor {
             if let Some(saved_space) = matched {
                 self.persistence.saved_spaces.remove(&saved_space);
                 if saved_space != live_space {
-                    self.layout_manager.layout_engine.remap_space(saved_space, live_space);
+                    pairs.push((saved_space, live_space));
                 }
             }
+        }
+
+        for (i, (saved_space, _)) in pairs.iter().enumerate() {
+            let scratch = SpaceId::new(scratch_base + 1 + i as u64);
+            self.layout_manager.layout_engine.remap_space(*saved_space, scratch);
+        }
+        for (i, (_, live_space)) in pairs.iter().enumerate() {
+            let scratch = SpaceId::new(scratch_base + 1 + i as u64);
+            self.layout_manager.layout_engine.remap_space(scratch, *live_space);
         }
     }
 
@@ -759,6 +787,7 @@ mod tests {
     use crate::actor::app::{AppThreadHandle, WindowId, pid_t};
     use crate::actor::reactor::Reactor;
     use crate::common::collections::{HashMap, HashSet};
+    use crate::layout_engine::snapshot::Snapshot;
     use crate::layout_engine::{LayoutEngine, LayoutEvent};
     use crate::model::reactor::{AppState, WindowState};
     use crate::model::virtual_workspace::AppRuleResult;
@@ -1183,6 +1212,63 @@ mod tests {
             vwm.workspace_for_window(windows, saved_space, w).is_none(),
             "nothing left on the saved space id"
         );
+    }
+
+    #[test]
+    fn remap_restored_spaces_survives_overlapping_shift() {
+        // saved {1,2} → live {2,3}: a sequential destructive remap would let
+        // remap(1→2) clobber saved-2's state (living on SpaceId 2) before
+        // remap(2→3) migrates it, so saved-2's window would be lost.
+        let saved_1 = SpaceId::new(1);
+        let saved_2 = SpaceId::new(2);
+        let live_2 = SpaceId::new(2);
+        let live_3 = SpaceId::new(3);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+
+        let w1 = WindowId::new(1, 1);
+        let w2 = WindowId::new(2, 1);
+        place_in_engine(&mut reactor, saved_1, &[w1]);
+        place_in_engine(&mut reactor, saved_2, &[w2]);
+
+        // test-display-0 now shows SpaceId 2, test-display-1 now shows SpaceId 3.
+        reactor.space_manager.screens = two_screen_snapshots(live_2, live_3);
+        let mut saved = HashMap::default();
+        saved.insert(saved_1, ("test-display-0".to_string(), 0u32));
+        saved.insert(saved_2, ("test-display-1".to_string(), 0u32));
+        reactor.install_restore_state(AdoptionTable::default(), saved);
+
+        reactor.remap_restored_spaces();
+
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        assert!(vwm.workspace_for_window(live_2, w1).is_some(), "saved-1 migrated to live space 2");
+        assert!(vwm.workspace_for_window(live_3, w2).is_some(), "saved-2 migrated to live space 3");
+        assert!(
+            vwm.workspace_for_window(live_3, w1).is_none(),
+            "saved-1 did not bleed onto space 3"
+        );
+    }
+
+    #[test]
+    fn flush_under_blackout_fingerprint_writes_nothing() {
+        // An all-displays blackout yields an empty fingerprint; flushing under it
+        // would stamp a bogus "" arrangement over the file. The guard skips it.
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        place_in_engine(&mut reactor, SpaceId::new(1), &[WindowId::new(1, 1)]);
+        reactor.space_manager.screens = Vec::new();
+
+        let path = std::env::temp_dir()
+            .join(format!("rift-blackout-{}-{}.ron", std::process::id(), line!()));
+        let _ = std::fs::remove_file(&path);
+        reactor.persistence.restore_path = Some(path.clone());
+
+        reactor.flush_snapshot();
+
+        let snapshot = Snapshot::load_or_default(&path);
+        assert!(
+            !snapshot.arrangements.contains_key(""),
+            "no arrangement stamped under the empty fingerprint"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     // ---- pruning ------------------------------------------------------------
