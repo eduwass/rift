@@ -54,6 +54,7 @@ pub fn handle_command_layout(
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
             | LayoutCommand::SetWorkspaceLayout { .. }
+            | LayoutCommand::SetWorkspaceName { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace
     );
@@ -76,6 +77,7 @@ pub fn handle_command_layout(
         | LayoutCommand::PrevWorkspace(_)
         | LayoutCommand::SwitchToWorkspace(_)
         | LayoutCommand::SetWorkspaceLayout { .. }
+        | LayoutCommand::SetWorkspaceName { .. }
         | LayoutCommand::CreateWorkspace
         | LayoutCommand::SwitchToLastWorkspace => {
             if let Some(space) = workspace_space {

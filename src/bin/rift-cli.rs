@@ -195,6 +195,15 @@ enum WorkspaceCommands {
         /// Layout mode: traditional, bsp, stack, master_stack, scrolling
         mode: String,
     },
+    /// Set a custom name for a workspace (or the active workspace when omitted).
+    /// Pass an empty name to clear the custom name and revert to the config default.
+    SetName {
+        /// Workspace index (0-based). Defaults to active workspace if omitted.
+        #[arg(long)]
+        workspace_id: Option<usize>,
+        /// Custom name. An empty string clears the custom name.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -669,6 +678,9 @@ fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> 
                 LC::SetWorkspaceLayout { workspace: workspace_id, mode },
             )))
         }
+        WorkspaceCommands::SetName { workspace_id, name } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::SetWorkspaceName { workspace: workspace_id, name }),
+        )),
     }
 }
 

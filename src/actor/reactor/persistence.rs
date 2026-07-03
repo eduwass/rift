@@ -20,7 +20,7 @@ use tracing::info;
 
 use super::Reactor;
 use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::common::config;
 use crate::common::debounce::Debouncer;
 use crate::layout_engine::LayoutEngine;
@@ -162,6 +162,10 @@ pub struct PersistenceState {
     /// Saved space identities awaiting resolution to a live `SpaceId`:
     /// `saved SpaceId -> (display_uuid, ordinal)`.
     saved_spaces: HashMap<SpaceId, (String, u32)>,
+    /// Pre-restart ids of windows that were pinned topmost, awaiting adoption.
+    /// When a window with one of these ids is adopted, its live id is re-pinned
+    /// (see [`Reactor::adopt_entry`]); entries never adopted are simply dropped.
+    pending_topmost: HashSet<WindowId>,
     /// When the global adoption settle timeout expires (armed while adopting).
     settle_deadline: Option<Instant>,
     /// Match bookkeeping for the current restore, logged at settle so reboot
@@ -170,6 +174,7 @@ pub struct PersistenceState {
     adopt_exact: u32,
     adopt_fuzzy: u32,
     adopt_fallthrough: u32,
+    adopt_pruned: u32,
     /// Display fingerprint the live engine currently belongs to. Set when the
     /// first arrangement is activated and updated on every arrangement switch;
     /// a mismatch against the connected display set is what triggers a switch.
@@ -185,10 +190,12 @@ impl Default for PersistenceState {
             debouncer: Debouncer::new(SAVE_DEBOUNCE),
             adoption: AdoptionTable::default(),
             saved_spaces: HashMap::default(),
+            pending_topmost: HashSet::default(),
             settle_deadline: None,
             adopt_exact: 0,
             adopt_fuzzy: 0,
             adopt_fallthrough: 0,
+            adopt_pruned: 0,
             active_fingerprint: None,
         }
     }
@@ -344,9 +351,16 @@ impl Reactor {
             engine: engine_owned,
             spaces,
             windows,
-            // Topmost persistence + re-apply is P4; carry the set so the data is
-            // not lost across saves once that phase re-applies it.
-            topmost: self.topmost_windows.keys().copied().collect(),
+            // Persist only explicit pins. Implicit `floating_windows_topmost`
+            // pins are a pure function of floating state (already serialized) and
+            // are re-derived by `sync_floating_topmost` after restore, so saving
+            // them would wrongly resurrect them as explicit pins.
+            topmost: self
+                .topmost_windows
+                .iter()
+                .filter(|(_, state)| !state.implicit)
+                .map(|(wid, _)| *wid)
+                .collect(),
         }
     }
 
@@ -405,7 +419,7 @@ impl Reactor {
             return;
         };
 
-        let Arrangement { mut engine, spaces, windows, topmost: _ } = arrangement;
+        let Arrangement { mut engine, spaces, windows, topmost } = arrangement;
         engine.rehydrate_restored(
             &self.config.virtual_workspaces,
             &self.config.settings.layout,
@@ -413,6 +427,7 @@ impl Reactor {
         );
         self.layout_manager.layout_engine = engine;
         self.install_restore_state(AdoptionTable::from_windows(windows), spaces);
+        self.persistence.pending_topmost = topmost.into_iter().collect();
         info!(
             "restored layout arrangement for display fingerprint {fingerprint:?} ({} windows pending adoption)",
             self.persistence.adoption.by_server_id.len()
@@ -430,9 +445,13 @@ impl Reactor {
         let arm_settle = !adoption.is_empty();
         self.persistence.adoption = adoption;
         self.persistence.saved_spaces = saved_spaces;
+        // The caller sets `pending_topmost` right after (from the arrangement's
+        // saved set); clear any leftovers from a previous restore first.
+        self.persistence.pending_topmost = HashSet::default();
         self.persistence.adopt_exact = 0;
         self.persistence.adopt_fuzzy = 0;
         self.persistence.adopt_fallthrough = 0;
+        self.persistence.adopt_pruned = 0;
         if arm_settle {
             self.persistence.settle_deadline = Some(Instant::now() + ADOPTION_SETTLE_TIMEOUT);
         }
@@ -483,7 +502,7 @@ impl Reactor {
         if let Some(path) = self.persistence.restore_path.clone() {
             let mut snapshot = Snapshot::load_or_default(&path);
             if let Some(arrangement) = snapshot.arrangements.remove(&new_fingerprint) {
-                let Arrangement { mut engine, spaces, windows, topmost: _ } = arrangement;
+                let Arrangement { mut engine, spaces, windows, topmost } = arrangement;
                 engine.rehydrate_restored(
                     &self.config.virtual_workspaces,
                     &self.config.settings.layout,
@@ -491,6 +510,7 @@ impl Reactor {
                 );
                 self.layout_manager.layout_engine = engine;
                 self.install_restore_state(AdoptionTable::from_windows(windows), spaces);
+                self.persistence.pending_topmost = topmost.into_iter().collect();
                 info!(
                     "switched to saved layout arrangement for display fingerprint {new_fingerprint:?}"
                 );
@@ -566,6 +586,7 @@ impl Reactor {
                 let result = self.adopt_entry(server_id, old_wid, wid, space);
                 if result.is_some() {
                     self.persistence.adopt_exact += 1;
+                    self.finish_adoption_if_drained();
                 }
                 return result;
             }
@@ -579,6 +600,7 @@ impl Reactor {
             for (saved_key, old_wid) in candidates {
                 if let Some(result) = self.adopt_entry(saved_key, old_wid, wid, space) {
                     self.persistence.adopt_fuzzy += 1;
+                    self.finish_adoption_if_drained();
                     return Some(result);
                 }
             }
@@ -610,10 +632,20 @@ impl Reactor {
         let floating = engine.is_window_floating(old_wid);
 
         self.persistence.adoption.claim(saved_key);
+        // Topmost is snapshot-side (keyed by the pre-restart id), so map it here
+        // as we rewrite: if this window was pinned before the restart, re-pin its
+        // live id via the same path the toggle uses.
+        let was_topmost = self.persistence.pending_topmost.remove(&old_wid);
         if old_wid != wid {
             self.layout_manager.layout_engine.rewrite_window_id(old_wid, wid);
         }
+        if was_topmost {
+            self.pin_topmost_window(wid);
+        }
         self.mark_layout_dirty();
+        // The drain check runs in the caller *after* the match counter is bumped
+        // (see `try_adopt_window`), so finalizing here would reset the counters
+        // before that increment.
 
         Some(Ok(AppRuleResult::Managed(AppRuleAssignment {
             workspace_id,
@@ -659,35 +691,58 @@ impl Reactor {
     }
 
     /// Global settle backstop: evict every remaining unclaimed entry (dead apps
-    /// that never came back) once the timeout passes, then log the restore's match
-    /// tally so reboot re-adoption quality is observable.
+    /// that never came back) once the timeout passes. Eviction drains the table,
+    /// which finalizes the restore (disarms + logs) via `finish_adoption_if_drained`;
+    /// the trailing call covers the degenerate "nothing to evict" case.
     fn prune_settled_adoptions(&mut self) {
-        self.persistence.settle_deadline = None;
         let stale = self.persistence.adoption.drain_all();
-        let pruned = stale.len();
         self.evict_pruned_windows(stale);
-        info!(
-            "adoption settled: {} exact, {} fuzzy, {} fell through, {pruned} pruned",
-            self.persistence.adopt_exact,
-            self.persistence.adopt_fuzzy,
-            self.persistence.adopt_fallthrough,
-        );
+        self.finish_adoption();
     }
 
     fn evict_pruned_windows(&mut self, stale: Vec<WindowId>) {
         if stale.is_empty() {
             return;
         }
+        self.persistence.adopt_pruned += stale.len() as u32;
         for wid in stale {
             self.layout_manager.layout_engine.prune_window(wid);
         }
-        self.persistence.settle_deadline = if self.persistence.adoption.is_empty() {
-            None
-        } else {
-            self.persistence.settle_deadline
-        };
         self.mark_layout_dirty();
         let _ = self.update_layout_or_warn(false, false);
+        self.finish_adoption_if_drained();
+    }
+
+    /// Finalize the restore as soon as its adoption table empties — every window
+    /// was either re-adopted or pruned — instead of idling until the global
+    /// settle timeout. Emits the tally once (a clean restart no longer waits ~3
+    /// minutes to log). A no-op when no restore is in flight.
+    fn finish_adoption_if_drained(&mut self) {
+        if self.persistence.adoption.is_empty() {
+            self.finish_adoption();
+        }
+    }
+
+    /// Disarm the settle timer and log the restore's match tally once, so reboot
+    /// re-adoption quality is observable and the counters are reset for the next
+    /// restore. Guarded on the armed deadline so both callers (early drain and
+    /// the global timeout) log exactly once.
+    fn finish_adoption(&mut self) {
+        if self.persistence.settle_deadline.is_none() {
+            return;
+        }
+        self.persistence.settle_deadline = None;
+        info!(
+            "adoption settled: {} exact, {} fuzzy, {} fell through, {} pruned",
+            self.persistence.adopt_exact,
+            self.persistence.adopt_fuzzy,
+            self.persistence.adopt_fallthrough,
+            self.persistence.adopt_pruned,
+        );
+        self.persistence.adopt_exact = 0;
+        self.persistence.adopt_fuzzy = 0;
+        self.persistence.adopt_fallthrough = 0;
+        self.persistence.adopt_pruned = 0;
     }
 }
 
@@ -1158,6 +1213,144 @@ mod tests {
         let windows = &reactor.state.windows;
         assert!(vwm.workspace_for_window_any(windows, keep).is_some(), "claimed window kept");
         assert!(vwm.workspace_for_window_any(windows, dead).is_none(), "unreturned window pruned, no zombie");
+    }
+
+    // ---- topmost re-application (P4) ----------------------------------------
+
+    #[test]
+    fn restored_topmost_window_is_repinned_on_adoption() {
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        // The restored engine held two windows; only one was pinned topmost.
+        let pinned = WindowId::new(1, 1);
+        let plain = WindowId::new(1, 2);
+        place_in_engine(&mut reactor, space, &[pinned, plain]);
+
+        let mut windows = HashMap::default();
+        windows.insert(pinned, identity(101));
+        windows.insert(plain, identity(102));
+        reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+        // The saved topmost set is keyed by the pre-restart id.
+        reactor.persistence.pending_topmost = [pinned].into_iter().collect();
+
+        // Both windows reappear under new ids; adopting the pinned one re-applies
+        // topmost onto its live id, mapping the pre-restart id through the rewrite.
+        let live_pinned = WindowId::new(2, 1);
+        register_live(&mut reactor, live_pinned, 101);
+        assert!(reactor.try_adopt_window(live_pinned, space).is_some());
+        assert!(
+            reactor.topmost_windows.contains_key(&live_pinned),
+            "restored topmost pin re-applied onto the live id"
+        );
+        assert!(
+            !reactor.topmost_windows.contains_key(&pinned),
+            "the pre-restart id is not left pinned"
+        );
+
+        // A window that was not in the saved topmost set is adopted untouched.
+        let live_plain = WindowId::new(2, 2);
+        register_live(&mut reactor, live_plain, 102);
+        assert!(reactor.try_adopt_window(live_plain, space).is_some());
+        assert!(
+            !reactor.topmost_windows.contains_key(&live_plain),
+            "a window that was not topmost stays unpinned"
+        );
+    }
+
+    #[test]
+    fn assemble_persists_only_explicit_topmost_pins() {
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        reactor.space_manager.screens = one_screen_snapshots(space);
+        let explicit = WindowId::new(1, 1);
+        let implicit = WindowId::new(1, 2);
+        place_in_engine(&mut reactor, space, &[explicit, implicit]);
+        register_live(&mut reactor, explicit, 101);
+        register_live(&mut reactor, implicit, 102);
+
+        // Pin both, then mark one as an implicit float-sweep pin.
+        reactor.pin_topmost_window(explicit);
+        reactor.pin_topmost_window(implicit);
+        reactor.topmost_windows.get_mut(&implicit).unwrap().implicit = true;
+
+        let snapshot = reactor.assemble_single_snapshot();
+        let arrangement = snapshot.arrangements.get("test-display-0").unwrap();
+        assert_eq!(
+            arrangement.topmost,
+            vec![explicit],
+            "only the explicit pin is persisted; the implicit one is re-derived after restore"
+        );
+    }
+
+    #[test]
+    fn adoption_drain_finalizes_restore_and_resets_counters() {
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        let w1 = WindowId::new(1, 1);
+        let w2 = WindowId::new(1, 2);
+        place_in_engine(&mut reactor, space, &[w1, w2]);
+        let mut windows = HashMap::default();
+        windows.insert(w1, identity(101));
+        windows.insert(w2, identity(102));
+        reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+        assert!(reactor.persistence.settle_deadline.is_some(), "settle timer armed while adopting");
+
+        let live1 = WindowId::new(2, 1);
+        register_live(&mut reactor, live1, 101);
+        assert!(reactor.try_adopt_window(live1, space).is_some());
+        assert!(
+            reactor.persistence.settle_deadline.is_some(),
+            "one window still pending: restore not finished"
+        );
+
+        // Adopting the last window drains the table, finalizing the restore right
+        // away instead of idling until the global settle timeout.
+        let live2 = WindowId::new(2, 2);
+        register_live(&mut reactor, live2, 102);
+        assert!(reactor.try_adopt_window(live2, space).is_some());
+        assert!(
+            reactor.persistence.settle_deadline.is_none(),
+            "drained restore disarms the settle timer"
+        );
+        assert_eq!(
+            reactor.persistence.adopt_exact, 0,
+            "the tally is logged once and its counters reset"
+        );
+    }
+
+    #[test]
+    fn custom_workspace_name_roundtrips_through_the_snapshot() {
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        reactor.space_manager.screens = one_screen_snapshots(space);
+        let w = WindowId::new(1, 1);
+        place_in_engine(&mut reactor, space, &[w]);
+        register_live(&mut reactor, w, 101);
+
+        let ws_id = reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .list_workspaces(space)[0]
+            .0;
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .rename_workspace(space, ws_id, "mine".to_string());
+
+        let snapshot = reactor.assemble_single_snapshot();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.ron");
+        snapshot.save(&path).unwrap();
+
+        let mut loaded = super::Snapshot::load_or_default(&path);
+        let engine = loaded.arrangements.remove("test-display-0").unwrap().engine;
+        assert_eq!(
+            engine.workspace_name(space, ws_id).as_deref(),
+            Some("mine"),
+            "custom workspace name survives the snapshot save/load path"
+        );
     }
 
     // ---- SaveAndExit assembler output is loadable ---------------------------
