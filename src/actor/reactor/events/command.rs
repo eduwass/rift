@@ -201,18 +201,6 @@ pub fn handle_command_reactor_serialize(
     Ok(EventOutcome::finalized_event(None, false, false, false).with_stdout_line(serialized?))
 }
 
-pub fn handle_command_reactor_save_and_exit(
-    layout: &LayoutManager,
-) -> anyhow::Result<EventOutcome> {
-    match layout.layout_engine.save(config::restore_file()) {
-        Ok(()) => std::process::exit(0),
-        Err(e) => {
-            error!("Could not save layout: {e}");
-            std::process::exit(3);
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ToggleSpacePayload {
     pub config: SpaceActivationConfig,

@@ -961,6 +961,34 @@ mod tests {
             "orthogonal max-only constraint should not change the parent split allocation"
         );
     }
+
+    #[test]
+    fn rewrite_window_id_repoints_leaf_and_index_in_place() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        let old = w(1);
+        let sibling = w(2);
+        system.add_window_after_selection(layout, old);
+        system.add_window_after_selection(layout, sibling);
+
+        // A rediscovered window carries a fresh runtime id (new pid after restart).
+        let new = WindowId::new(99, 3);
+        system.rewrite_window_id(old, new);
+
+        // The window->node index moved wholesale from old to new.
+        assert!(!system.window_to_node.contains_key(&old), "old id gone from index");
+        assert!(system.window_to_node.contains_key(&new), "new id present in index");
+        // The leaf node's stored payload is the new id, so the tree slot is inherited.
+        let node = system.window_to_node[&new];
+        assert!(matches!(
+            system.kind.get(node),
+            Some(NodeKind::Leaf { window: Some(payload), .. }) if *payload == new
+        ));
+        // Behaviourally: the layout now reports `new` where `old` used to be, the
+        // sibling is untouched, and no phantom `old` remains.
+        assert_eq!(system.windows_for_app(layout, new.pid), vec![new]);
+        assert_eq!(system.windows_for_app(layout, old.pid), vec![sibling]);
+    }
 }
 
 impl LayoutSystem for BspLayoutSystem {
@@ -1157,6 +1185,18 @@ impl LayoutSystem for BspLayoutSystem {
             self.window_to_node.keys().copied().filter(|w| w.pid == pid).collect();
         for w in windows {
             self.remove_window(w);
+        }
+    }
+
+    fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if old == new {
+            return;
+        }
+        if let Some(node) = self.window_to_node.remove(&old) {
+            self.window_to_node.insert(new, node);
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node) {
+                *window = Some(new);
+            }
         }
     }
 

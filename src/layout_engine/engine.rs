@@ -1142,6 +1142,19 @@ impl LayoutEngine {
         }
     }
 
+    /// Drop a window from every part of the engine. Used to evict restored windows
+    /// that were never re-adopted (their app died or the window closed while rift
+    /// was down), so pruned state is what the next save persists — no zombies.
+    pub fn prune_window(&mut self, wid: WindowId) {
+        self.remove_window_from_all_tiling_trees(wid);
+        self.remove_floating_position(wid);
+        self.floating.remove_floating(wid);
+        self.window_layout_constraints.remove(&wid);
+        if self.focused_window == Some(wid) {
+            self.focused_window = None;
+        }
+    }
+
     fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
         for space in self.workspace_layouts.spaces() {
             if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
@@ -1324,6 +1337,51 @@ impl LayoutEngine {
                 *space = new_space;
             }
         }
+    }
+
+    /// Replace every reference to `old` with `new` throughout the engine — trees,
+    /// workspace membership, window->workspace index, floating state, focus, and
+    /// layout constraints — preserving the window's exact placement.
+    ///
+    /// This is the restore-time adoption primitive: the engine is pre-populated
+    /// from a snapshot using the pre-restart (now-dead) `WindowId`s, and as each
+    /// live window is rediscovered its snapshot identity is rewritten onto the
+    /// fresh runtime id so the tree it was placed in is inherited exactly.
+    pub fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if old == new {
+            return;
+        }
+        self.virtual_workspace_manager.rewrite_window_id(old, new);
+        self.floating.rewrite_window_id(old, new);
+        if self.focused_window == Some(old) {
+            self.focused_window = Some(new);
+        }
+        if let Some(constraints) = self.window_layout_constraints.remove(&old) {
+            self.window_layout_constraints.insert(new, constraints);
+        }
+    }
+
+    /// Every window the engine currently tracks (tiled in any workspace tree, plus
+    /// floating). Used to assemble the durable identity sidecar at save time.
+    pub fn all_window_ids(&self) -> Vec<WindowId> {
+        let mut windows: HashSet<WindowId> = HashSet::default();
+        for space in self.workspace_layouts.spaces() {
+            for (ws_id, layout) in self.workspace_layouts.active_layouts_for_space(space) {
+                windows.extend(self.workspace_tree(ws_id).visible_windows_in_layout(layout));
+            }
+        }
+        windows.extend(self.floating.iter_floating());
+        windows.into_iter().collect()
+    }
+
+    /// Native spaces the engine holds layout state for, each paired with the last
+    /// display uuid it was seen on (the durable half of the space identity).
+    pub fn spaces_with_display_uuid(&self) -> Vec<(SpaceId, Option<String>)> {
+        self.virtual_workspace_manager
+            .initialized_spaces()
+            .into_iter()
+            .map(|space| (space, self.space_display_map.get(&space).and_then(|u| u.clone())))
+            .collect()
     }
 
     pub fn prune_display_state(&mut self, active_display_uuids: &[String]) {
@@ -2361,6 +2419,19 @@ impl LayoutEngine {
         }
     }
 
+    /// Re-init the `#[serde(skip)]` fields of an engine deserialized from a
+    /// snapshot arrangement (rather than loaded from a bare-engine file). The
+    /// reactor calls this after lifting `Arrangement.engine` out of a `Snapshot`,
+    /// before installing it as the live engine.
+    pub fn rehydrate_restored(
+        &mut self,
+        virtual_workspace_config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+        broadcast_tx: Option<BroadcastSender>,
+    ) {
+        self.rehydrate(virtual_workspace_config, layout_settings, broadcast_tx);
+    }
+
     /// Repopulate the `#[serde(skip)]` fields that deserialize to defaults:
     /// live handles (`broadcast_tx`), config-derived settings, and the virtual
     /// workspace manager's config-backed caches. Mirrors what `new` wires up.
@@ -2794,7 +2865,7 @@ impl LayoutEngine {
             // also positions it, producing a frame-change feedback loop (the window visibly
             // ping-pongs between displays). Clearing it leaves the target layout pass as the
             // sole authority, which centers the window on the destination screen.
-            self.virtual_workspace_manager.remove_floating_position(window_id);
+            self.remove_floating_position(window_id);
             self.floating.add_active(target_space, window_id.pid, window_id);
             self.floating.set_last_focus(Some(window_id));
         } else if let Some(target_layout) =
@@ -4400,5 +4471,123 @@ mod tests {
                 "engine serialization missing wire key {key:?}: {serialized}"
             );
         }
+    }
+
+    #[test]
+    fn rewrite_window_id_preserves_tiled_placement() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 1000.0));
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+
+        let old = WindowId::new(1, 1);
+        let sibling = WindowId::new(1, 2);
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            1,
+            vec![window_info(old), window_info(sibling)],
+            None,
+        ));
+        // Skew the split so a lost ratio would be detectable.
+        let _ = engine.handle_event(LayoutEvent::WindowFocused(space, old));
+        let _ = engine.handle_command(
+            Some(space),
+            &[space],
+            &HashMap::default(),
+            LayoutCommand::ResizeWindowBy { amount: 0.15 },
+        );
+        let gaps = engine.layout_settings.gaps.clone();
+        let layout_before = engine.calculate_layout(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        // A fresh runtime id (as a rediscovered window would carry after restart).
+        let new = WindowId::new(77, 5);
+        engine.rewrite_window_id(old, new);
+
+        let layout_after = engine.calculate_layout(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        // Same frames, with `old` swapped for `new` at the identical position.
+        let frame_of = |layout: &Vec<(WindowId, CGRect)>, wid: WindowId| {
+            layout.iter().find(|(w, _)| *w == wid).map(|(_, f)| *f)
+        };
+        assert_eq!(frame_of(&layout_before, old), frame_of(&layout_after, new));
+        assert_eq!(frame_of(&layout_before, sibling), frame_of(&layout_after, sibling));
+        assert!(frame_of(&layout_after, old).is_none(), "old id must be gone");
+        assert_eq!(
+            engine.virtual_workspace_manager().workspace_for_window_any(old),
+            None
+        );
+        assert!(
+            engine.virtual_workspace_manager().workspace_for_window_any(new).is_some(),
+            "new id inherits the workspace mapping"
+        );
+    }
+
+    #[test]
+    fn rewrite_window_id_preserves_floating_state() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 1000.0));
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+
+        let tiled = WindowId::new(1, 1);
+        let old = WindowId::new(1, 2);
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            1,
+            vec![window_info(tiled), window_info(old)],
+            None,
+        ));
+        engine.ensure_window_floating(space, old);
+        assert!(engine.is_window_floating(old));
+
+        let new = WindowId::new(77, 5);
+        engine.rewrite_window_id(old, new);
+
+        assert!(!engine.is_window_floating(old), "old id no longer floating");
+        assert!(engine.is_window_floating(new), "floating state moves to the new id");
+        assert!(!engine.is_window_floating(tiled));
+    }
+
+    #[test]
+    fn rewrite_window_id_is_a_noop_for_absent_or_identical_ids() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 1000.0));
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+        let w1 = WindowId::new(1, 1);
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            1,
+            vec![window_info(w1)],
+            None,
+        ));
+
+        // Identical ids: nothing changes.
+        engine.rewrite_window_id(w1, w1);
+        assert!(engine.virtual_workspace_manager().workspace_for_window_any(w1).is_some());
+
+        // Absent id: the present window is untouched and no phantom appears.
+        let absent = WindowId::new(999, 9);
+        let ghost = WindowId::new(888, 8);
+        engine.rewrite_window_id(absent, ghost);
+        assert!(engine.virtual_workspace_manager().workspace_for_window_any(ghost).is_none());
+        assert!(engine.virtual_workspace_manager().workspace_for_window_any(w1).is_some());
     }
 }

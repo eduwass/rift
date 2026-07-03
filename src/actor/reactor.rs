@@ -8,6 +8,7 @@ mod animation;
 mod events;
 mod main_window;
 mod managers;
+mod persistence;
 mod query;
 mod replay;
 pub mod transaction_manager;
@@ -259,6 +260,11 @@ pub enum Event {
     /// Periodic tick: reclaim space from windows that closed without notifying rift
     /// (see [`Reactor::reconcile_orphan_windows`]).
     ReconcileOrphans,
+
+    /// Periodic tick driving the debounced layout-snapshot save and the adoption
+    /// settle timeout (see [`Reactor::persistence_tick`]).
+    #[serde(skip)]
+    PersistTick,
     MenuOpened(pid_t),
     MenuClosed(pid_t),
 
@@ -363,6 +369,7 @@ pub struct Reactor {
     /// Windows explicitly un-pinned via toggle-topmost while
     /// `floating_windows_topmost` is on, so the float sweep doesn't re-pin them.
     topmost_optout: HashSet<WindowId>,
+    persistence: persistence::PersistenceState,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -407,6 +414,7 @@ impl Reactor {
         reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
         reactor.communication_manager.gesture_tap_tx = gesture_tap_tx;
         reactor.communication_manager.events_tx = Some(events_tx_clone.clone());
+        reactor.enable_persistence(crate::common::config::restore_file());
         let query_handle = ReactorQueryHandle::new(events_tx_clone.clone());
         thread::Builder::new()
             .name("reactor".to_string())
@@ -425,7 +433,8 @@ impl Reactor {
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
     ) -> Reactor {
-        // FIXME: Remove apps that are no longer running from restored state.
+        // Restored windows whose apps did not come back are pruned by the
+        // adoption settle pipeline (see reactor/persistence.rs).
         record.start(&config, &layout_engine);
         let (raise_manager_tx, _rx) = actor::channel();
         let (window_notify_tx, window_tx_store) = match window_notify {
@@ -502,6 +511,7 @@ impl Reactor {
             pending_display_move_warp: None,
             topmost_windows: HashMap::default(),
             topmost_optout: HashSet::default(),
+            persistence: persistence::PersistenceState::default(),
         };
         reactor
     }
@@ -966,6 +976,7 @@ impl Reactor {
         reactor.animation_tx = Some(animation_tx);
         let event_tap_tx = reactor.communication_manager.event_tap_tx.clone();
         let reconcile_tx = events_tx.clone();
+        let persist_tx = events_tx.clone();
         let reactor_task = Self::run_reactor_loop(reactor, events);
         let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, event_tap_tx);
         let animation_task = animation::AnimationManager::run(animation_rx);
@@ -977,7 +988,22 @@ impl Reactor {
                 }
             }
         };
-        let _ = tokio::join!(reactor_task, raise_manager_task, animation_task, reconcile_task);
+        // Drive the debounced layout-snapshot save and the adoption settle timeout.
+        let persist_task = async move {
+            loop {
+                crate::sys::timer::Timer::sleep(Duration::from_millis(500)).await;
+                if persist_tx.try_send(Event::PersistTick).is_err() {
+                    break;
+                }
+            }
+        };
+        let _ = tokio::join!(
+            reactor_task,
+            raise_manager_task,
+            animation_task,
+            reconcile_task,
+            persist_task
+        );
     }
 
     async fn run_reactor_loop(mut reactor: Reactor, mut events: Receiver) {
@@ -1685,9 +1711,13 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveAndExit)) => {
-                return command_workflow::handle_command_reactor_save_and_exit(
-                    &self.layout_manager,
-                );
+                match self.save_snapshot_now() {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        error!("Could not save layout: {e}");
+                        std::process::exit(3);
+                    }
+                }
             }
             Event::Command(Command::Reactor(ReactorCommand::Serialize)) => {
                 let serialized = self.serialize_state();
@@ -1952,6 +1982,9 @@ impl Reactor {
             }
             Event::ReconcileOrphans => {
                 return Ok(self.orphan_reconcile_outcome());
+            }
+            Event::PersistTick => {
+                self.persistence_tick();
             }
             _ => (),
         }
@@ -2700,6 +2733,8 @@ impl Reactor {
 
         self.refocus_manager.stale_cleanup_state = StaleCleanupState::Enabled;
         self.space_state.screens = screens;
+        self.activate_restore_if_ready();
+        self.remap_restored_spaces();
         if invalidates_pending_targets {
             self.clear_pending_hidden_window_targets();
         }
@@ -2911,6 +2946,7 @@ impl Reactor {
                 focused_window,
             },
         ));
+        self.prune_app_adoptions(pid);
         self.apply_event_outcome(outcome);
     }
 
@@ -3790,6 +3826,8 @@ impl Reactor {
         for space in self.space_state.iter_known_spaces() {
             self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
         }
+        // Any layout event mutated engine state; schedule a debounced save.
+        self.mark_layout_dirty();
     }
 
     // Returns true if the window should be raised on mouse over considering
@@ -3977,7 +4015,9 @@ impl Reactor {
                             .unwrap_or(false),
                     )
                 };
-                let assign_result = {
+                let assign_result = if let Some(adopted) = self.try_adopt_window(*wid, space) {
+                    adopted
+                } else {
                     let window_metadata = self.state.windows.window(*wid).map(|window| {
                         (
                             window.info.title.clone(),

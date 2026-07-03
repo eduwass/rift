@@ -614,6 +614,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
+    fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        self.tree.data.window.rewrite_window_id(old, new);
+    }
+
     fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
         self.root(layout)
             .traverse_postorder(self.map())
@@ -2227,6 +2231,24 @@ impl WindowIndex {
             .or_default()
             .0
             .push(WindowNodeInfo { layout, node });
+    }
+
+    /// Repoint every node currently mapped to `old` at `new`, in place. Preserves
+    /// the node/layout structure exactly; only the stored window identity changes.
+    fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if old == new {
+            return;
+        }
+        for wid in self.windows.values_mut() {
+            if *wid == old {
+                *wid = new;
+            }
+        }
+        if let Some(infos) = self.window_nodes.remove(&old) {
+            // A pre-restart id is unique, so `new` cannot already be present; merge
+            // defensively regardless so no node mapping is lost.
+            self.window_nodes.entry(new).or_default().0.extend(infos.0);
+        }
     }
 
     fn take_nodes_for(&mut self, wid: WindowId) -> impl Iterator<Item = (LayoutId, NodeId)> {

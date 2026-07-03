@@ -1047,6 +1047,33 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
+    fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if old == new {
+            return;
+        }
+        for state in self.layouts.values_mut() {
+            for column in &mut state.columns {
+                for wid in &mut column.windows {
+                    if *wid == old {
+                        *wid = new;
+                    }
+                }
+            }
+            if state.selected == Some(old) {
+                state.selected = Some(new);
+            }
+            if state.center_override_window == Some(old) {
+                state.center_override_window = Some(new);
+            }
+            if state.fullscreen.remove(&old) {
+                state.fullscreen.insert(new);
+            }
+            if state.fullscreen_within_gaps.remove(&old) {
+                state.fullscreen_within_gaps.insert(new);
+            }
+        }
+    }
+
     fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
         self.layout_state(layout)
             .map(|state| {
@@ -2495,5 +2522,25 @@ mod tests {
         // With 2 columns, they should respect the configured column_width_ratio (0.4 * 1000 = 400.0)
         assert!((w1_frame2.size.width - 400.0).abs() < 1.0);
         assert!((w2_frame2.size.width - 400.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn rewrite_window_id_repoints_column_membership_and_selection() {
+        let (mut system, layout, w1, w2) = setup_two_windows(ScrollingLayoutSettings::default());
+
+        // Rewrite w2 to a fresh runtime id (as a rediscovered window carries a new
+        // pid after a restart).
+        let selected_before = system.layout_state(layout).unwrap().selected;
+        let new = wid(99, 3);
+        system.rewrite_window_id(w2, new);
+
+        // Column membership follows the rewrite, in place, preserving order: `new`
+        // sits where w2 did, and w1 is untouched.
+        assert_eq!(system.windows_for_app(layout, new.pid), vec![new]);
+        assert_eq!(system.windows_for_app(layout, w1.pid), vec![w1]);
+        // If w2 happened to be the selected column, the pointer moved with it.
+        if selected_before == Some(w2) {
+            assert_eq!(system.layout_state(layout).unwrap().selected, Some(new));
+        }
     }
 }

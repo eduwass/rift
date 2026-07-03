@@ -127,6 +127,39 @@ impl VirtualWorkspace {
     }
 
     pub fn last_focused(&self) -> Option<WindowId> { self.last_focused }
+
+    /// Repoint this workspace's last-focus and layout tree from `old` to `new` in
+    /// place (restore-time adoption). Preserves tree position exactly.
+    fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if old == new {
+            return;
+        }
+        if self.last_focused == Some(old) {
+            self.last_focused = Some(new);
+        }
+        use crate::layout_engine::systems::LayoutSystem;
+        self.layout_system.rewrite_window_id(old, new);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HideCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
+}
+
+impl HideCorner {
+    pub fn opposite(self) -> Self {
+        match self {
+            HideCorner::TopLeft => HideCorner::TopRight,
+            HideCorner::TopRight => HideCorner::TopLeft,
+            HideCorner::BottomLeft => HideCorner::BottomRight,
+            HideCorner::BottomRight => HideCorner::BottomLeft,
+        }
+    }
 }
 
 /// Owns the virtual workspace topology for each native macOS space.
@@ -646,6 +679,15 @@ impl WorkspaceStore {
     ) {
         let _ = space;
         window_store.set_last_rule_decision(window_id, value);
+    }
+
+    pub fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if old == new {
+            return;
+        }
+        for (_, workspace) in self.workspaces.iter_mut() {
+            workspace.rewrite_window_id(old, new);
+        }
     }
 
     pub fn remove_window(&mut self, window_store: &mut WindowStore, window_id: WindowId) {

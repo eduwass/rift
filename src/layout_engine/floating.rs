@@ -19,6 +19,10 @@ impl FloatingManager {
         self.floating_windows.contains(&window_id)
     }
 
+    pub(crate) fn iter_floating(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.floating_windows.iter().copied()
+    }
+
     pub(crate) fn add_floating(&mut self, window_id: WindowId) {
         self.floating_windows.insert(window_id);
     }
@@ -139,6 +143,30 @@ impl FloatingManager {
         if !merged.is_empty() {
             self.active_floating_windows.insert(new_space, merged);
         }
+    }
+
+    /// Replace `old` with `new` everywhere this manager records it. Preserves
+    /// floating membership and last-focus across restore-time window adoption.
+    pub(crate) fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+        if old == new {
+            return;
+        }
+        if self.floating_windows.remove(&old) {
+            self.floating_windows.insert(new);
+        }
+        if self.last_floating_focus == Some(old) {
+            self.last_floating_focus = Some(new);
+        }
+        for space_map in self.active_floating_windows.values_mut() {
+            let was_active = space_map.get_mut(&old.pid).is_some_and(|set| set.remove(&old));
+            if was_active {
+                space_map.entry(new.pid).or_default().insert(new);
+            }
+        }
+        self.active_floating_windows.retain(|_, space_map| {
+            space_map.retain(|_, app_set| !app_set.is_empty());
+            !space_map.is_empty()
+        });
     }
 
     fn remove_active_entries(&mut self, window_id: WindowId) {
