@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use objc2_core_foundation::CGRect;
 use tracing::info;
 
 use super::Reactor;
@@ -40,7 +41,9 @@ struct AdoptionEntry {
     /// The pre-restart `WindowId` occupying this window's slot in the restored
     /// engine — the id to rewrite *from* once the live window is found.
     old_wid: WindowId,
-    #[allow(dead_code)]
+    /// Durable attributes, keyed by the saved (pre-restart) window-server id.
+    /// The exact stage matches on `identity.server_id`; the fuzzy (reboot) stage
+    /// matches on `bundle_id`/`title`/`ax_role`/`frame` when server ids changed.
     identity: WindowIdentity,
 }
 
@@ -70,18 +73,57 @@ impl AdoptionTable {
         self.by_server_id.get(&server_id).map(|e| e.old_wid)
     }
 
-    /// Consume the entry for `server_id` (claim-once).
-    fn claim(&mut self, server_id: WindowServerId) {
-        self.by_server_id.remove(&server_id);
+    /// Consume the entry keyed by its saved `server_id` (claim-once). For an exact
+    /// match the live and saved server ids are the same; for a fuzzy match the key
+    /// is the entry's *saved* server id (the live one has changed since reboot).
+    fn claim(&mut self, saved_server_id: WindowServerId) {
+        self.by_server_id.remove(&saved_server_id);
     }
 
-    /// Remove every unclaimed entry belonging to `pid`, returning their
-    /// pre-restart ids so the caller can evict them from the engine.
-    fn prune_pid(&mut self, pid: pid_t) -> Vec<WindowId> {
+    /// Rank unclaimed fuzzy candidates for a discovered window's durable
+    /// attributes, best first, returning each candidate's key (its saved
+    /// window-server id) and pre-restart id. A candidate must share the same
+    /// non-empty `bundle_id`, the exact `title`, and the same `ax_role`. Ties
+    /// break on frame similarity, then within-app discovery order (the pre-restart
+    /// id). Blank titles and missing bundle ids never match — too ambiguous for
+    /// mid-launch terminals/browsers.
+    fn fuzzy_candidates(
+        &self,
+        bundle_id: &str,
+        title: &str,
+        ax_role: &str,
+        frame: CGRect,
+    ) -> Vec<(WindowServerId, WindowId)> {
+        if bundle_id.is_empty() || title.trim().is_empty() {
+            return Vec::new();
+        }
+        let mut ranked: Vec<(WindowServerId, WindowId, f64)> = self
+            .by_server_id
+            .iter()
+            .filter(|(_, e)| {
+                !e.identity.bundle_id.is_empty()
+                    && e.identity.bundle_id == bundle_id
+                    && e.identity.title == title
+                    && e.identity.ax_role == ax_role
+            })
+            .map(|(k, e)| (*k, e.old_wid, frame_distance(frame, e.identity.frame)))
+            .collect();
+        ranked.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.1.cmp(&b.1)));
+        ranked.into_iter().map(|(k, wid, _)| (k, wid)).collect()
+    }
+
+    /// Remove every unclaimed entry belonging to a launched app, returning their
+    /// pre-restart ids so the caller can evict them from the engine. An entry
+    /// matches on stable `pid` (a plain rift restart keeps pids) *or* on durable
+    /// `bundle_id` (after a reboot pids change but bundle ids do not).
+    fn prune_app(&mut self, pid: pid_t, bundle_id: Option<&str>) -> Vec<WindowId> {
         let keys: Vec<WindowServerId> = self
             .by_server_id
             .iter()
-            .filter(|(_, e)| e.old_wid.pid == pid)
+            .filter(|(_, e)| {
+                e.old_wid.pid == pid
+                    || bundle_id.is_some_and(|b| !b.is_empty() && e.identity.bundle_id == b)
+            })
             .map(|(k, _)| *k)
             .collect();
         keys.into_iter().filter_map(|k| self.by_server_id.remove(&k)).map(|e| e.old_wid).collect()
@@ -91,6 +133,16 @@ impl AdoptionTable {
     fn drain_all(&mut self) -> Vec<WindowId> {
         std::mem::take(&mut self.by_server_id).into_values().map(|e| e.old_wid).collect()
     }
+}
+
+/// L1 distance between two frames (summed origin + size deltas). Used only to
+/// tiebreak fuzzy candidates that already agree on bundle/title/role, so the
+/// absolute scale is irrelevant — only the ordering is.
+fn frame_distance(a: CGRect, b: CGRect) -> f64 {
+    (a.origin.x - b.origin.x).abs()
+        + (a.origin.y - b.origin.y).abs()
+        + (a.size.width - b.size.width).abs()
+        + (a.size.height - b.size.height).abs()
 }
 
 /// All persistence state the reactor carries. Disabled (no restore path) in the
@@ -112,6 +164,12 @@ pub struct PersistenceState {
     saved_spaces: HashMap<SpaceId, (String, u32)>,
     /// When the global adoption settle timeout expires (armed while adopting).
     settle_deadline: Option<Instant>,
+    /// Match bookkeeping for the current restore, logged at settle so reboot
+    /// re-adoption quality is observable: windows re-adopted by exact server id,
+    /// by fuzzy attributes, and windows that matched nothing (normal placement).
+    adopt_exact: u32,
+    adopt_fuzzy: u32,
+    adopt_fallthrough: u32,
     /// Display fingerprint the live engine currently belongs to. Set when the
     /// first arrangement is activated and updated on every arrangement switch;
     /// a mismatch against the connected display set is what triggers a switch.
@@ -128,6 +186,9 @@ impl Default for PersistenceState {
             adoption: AdoptionTable::default(),
             saved_spaces: HashMap::default(),
             settle_deadline: None,
+            adopt_exact: 0,
+            adopt_fuzzy: 0,
+            adopt_fallthrough: 0,
             active_fingerprint: None,
         }
     }
@@ -369,6 +430,9 @@ impl Reactor {
         let arm_settle = !adoption.is_empty();
         self.persistence.adoption = adoption;
         self.persistence.saved_spaces = saved_spaces;
+        self.persistence.adopt_exact = 0;
+        self.persistence.adopt_fuzzy = 0;
+        self.persistence.adopt_fallthrough = 0;
         if arm_settle {
             self.persistence.settle_deadline = Some(Instant::now() + ADOPTION_SETTLE_TIMEOUT);
         }
@@ -473,10 +537,17 @@ impl Reactor {
 
     // ---- window adoption ----------------------------------------------------
 
-    /// Exact-match adoption, consulted before app-rules at discovery time. If the
-    /// discovered window's window-server id matches an unclaimed entry whose
-    /// restored placement is on `space`, rewrite the pre-restart id onto the live
-    /// one (inheriting its exact tree slot) and return the restored assignment.
+    /// Window adoption, consulted before app-rules at discovery time. Two stages:
+    ///
+    /// 1. **Exact:** the discovered window still carries a window-server id we
+    ///    recorded — the crash/restart path (server ids survive). A recorded id
+    ///    always belongs to exact matching, never fuzzy.
+    /// 2. **Fuzzy:** no recorded server id matched (a reboot changed them all), so
+    ///    match by durable attributes (`bundle_id` + exact `title` + `ax_role`),
+    ///    picking the closest-frame candidate on this space.
+    ///
+    /// Either stage rewrites the pre-restart `WindowId` onto the live one
+    /// (inheriting its exact tree slot) and returns the restored assignment.
     /// Returns `None` to fall through to normal assignment.
     pub(super) fn try_adopt_window(
         &mut self,
@@ -486,9 +557,48 @@ impl Reactor {
         if self.persistence.adoption.is_empty() {
             return None;
         }
-        let server_id = self.state.windows.window(wid)?.info.sys_id?;
-        let old_wid = self.persistence.adoption.peek(server_id)?;
 
+        // Stage 1 — exact. A window whose server id we recorded is handled here
+        // even if it surfaces on the wrong space (then adopt_entry returns `None`
+        // to defer it to its own space's pass): a recorded id is never fuzzy.
+        if let Some(server_id) = self.state.windows.window(wid).and_then(|w| w.info.sys_id) {
+            if let Some(old_wid) = self.persistence.adoption.peek(server_id) {
+                let result = self.adopt_entry(server_id, old_wid, wid, space);
+                if result.is_some() {
+                    self.persistence.adopt_exact += 1;
+                }
+                return result;
+            }
+        }
+
+        // Stage 2 — fuzzy. Best attribute-matched candidate on this space wins;
+        // candidates on other spaces are left for their own pass.
+        if let Some((bundle_id, title, ax_role, frame)) = self.live_identity(wid) {
+            let candidates =
+                self.persistence.adoption.fuzzy_candidates(&bundle_id, &title, &ax_role, frame);
+            for (saved_key, old_wid) in candidates {
+                if let Some(result) = self.adopt_entry(saved_key, old_wid, wid, space) {
+                    self.persistence.adopt_fuzzy += 1;
+                    return Some(result);
+                }
+            }
+        }
+
+        self.persistence.adopt_fallthrough += 1;
+        None
+    }
+
+    /// Complete an adoption once a table entry is chosen: verify its restored
+    /// placement is on `space` (else `None`, to defer it to that space's pass),
+    /// claim its slot by the entry's *saved* server id, rewrite the pre-restart id
+    /// onto the live one, and return the restored assignment.
+    fn adopt_entry(
+        &mut self,
+        saved_key: WindowServerId,
+        old_wid: WindowId,
+        wid: WindowId,
+        space: SpaceId,
+    ) -> Option<Result<AppRuleResult, WorkspaceError>> {
         let engine = &self.layout_manager.layout_engine;
         // Only adopt on the space the snapshot placed this window on; otherwise
         // leave the entry for its correct space's discovery pass.
@@ -499,7 +609,7 @@ impl Reactor {
         )?;
         let floating = engine.is_window_floating(old_wid);
 
-        self.persistence.adoption.claim(server_id);
+        self.persistence.adoption.claim(saved_key);
         if old_wid != wid {
             self.layout_manager.layout_engine.rewrite_window_id(old_wid, wid);
         }
@@ -510,6 +620,22 @@ impl Reactor {
             floating,
             prev_rule_decision: false,
         })))
+    }
+
+    /// A discovered window's durable attributes for fuzzy matching, mirroring how
+    /// [`assemble_arrangement`](Self::assemble_arrangement) records them: the
+    /// window's own bundle id, falling back to its app's; title; ax role; frame.
+    fn live_identity(&self, wid: WindowId) -> Option<(String, String, String, CGRect)> {
+        let state = self.state.windows.window(wid)?;
+        let bundle_id = state
+            .info
+            .bundle_id
+            .clone()
+            .or_else(|| self.app_manager.apps.get(&wid.pid).and_then(|a| a.info.bundle_id.clone()))
+            .unwrap_or_default();
+        let title = state.info.title.clone();
+        let ax_role = state.info.ax_role.clone().unwrap_or_default();
+        Some((bundle_id, title, ax_role, state.frame_monotonic))
     }
 
     // ---- pruning ------------------------------------------------------------
@@ -523,16 +649,29 @@ impl Reactor {
         if self.persistence.adoption.is_empty() {
             return;
         }
-        let stale = self.persistence.adoption.prune_pid(pid);
+        // Prune by the launched app's durable bundle id, not its pid: a reboot
+        // gives relaunched apps fresh pids, so the pre-restart `old_wid.pid` no
+        // longer identifies them. `prune_app` still honours a pid match too, so a
+        // plain restart (pids stable) keeps working.
+        let bundle_id = self.app_manager.apps.get(&pid).and_then(|a| a.info.bundle_id.clone());
+        let stale = self.persistence.adoption.prune_app(pid, bundle_id.as_deref());
         self.evict_pruned_windows(stale);
     }
 
     /// Global settle backstop: evict every remaining unclaimed entry (dead apps
-    /// that never came back) once the timeout passes.
+    /// that never came back) once the timeout passes, then log the restore's match
+    /// tally so reboot re-adoption quality is observable.
     fn prune_settled_adoptions(&mut self) {
         self.persistence.settle_deadline = None;
         let stale = self.persistence.adoption.drain_all();
+        let pruned = stale.len();
         self.evict_pruned_windows(stale);
+        info!(
+            "adoption settled: {} exact, {} fuzzy, {} fell through, {pruned} pruned",
+            self.persistence.adopt_exact,
+            self.persistence.adopt_fuzzy,
+            self.persistence.adopt_fallthrough,
+        );
     }
 
     fn evict_pruned_windows(&mut self, stale: Vec<WindowId>) {
@@ -561,13 +700,14 @@ mod tests {
 
     use super::super::testing::*;
     use super::{AdoptionTable, WindowIdentity};
-    use crate::actor::app::WindowId;
+    use crate::actor;
+    use crate::actor::app::{AppThreadHandle, WindowId, pid_t};
     use crate::actor::reactor::Reactor;
     use crate::common::collections::{HashMap, HashSet};
     use crate::layout_engine::{LayoutEngine, LayoutEvent};
-    use crate::model::reactor::WindowState;
+    use crate::model::reactor::{AppState, WindowState};
     use crate::model::virtual_workspace::AppRuleResult;
-    use crate::sys::app::WindowInfo;
+    use crate::sys::app::{AppInfo, WindowInfo};
     use crate::sys::screen::{ScreenInfo, SpaceId};
     use crate::sys::skylight::DisplayReconfigFlags;
     use crate::sys::window_server::WindowServerId;
@@ -654,6 +794,52 @@ mod tests {
         }
     }
 
+    /// A durable identity with fully specified fuzzy attributes and frame — for the
+    /// reboot path, where the saved server id no longer matches any live window.
+    fn identity_full(server: u32, bundle: &str, title: &str, role: &str, frame: CGRect) -> WindowIdentity {
+        WindowIdentity {
+            server_id: WindowServerId::new(server),
+            bundle_id: bundle.to_string(),
+            title: title.to_string(),
+            ax_role: role.to_string(),
+            frame,
+        }
+    }
+
+    /// Register a live window with fully specified fuzzy attributes (bundle/title/
+    /// role/frame), as a post-reboot rediscovery would arrive: a new `WindowId`,
+    /// a new (or absent) server id, but the same durable attributes.
+    fn register_live_full(
+        reactor: &mut Reactor,
+        wid: WindowId,
+        server: Option<u32>,
+        bundle: &str,
+        title: &str,
+        role: &str,
+        frame: CGRect,
+    ) {
+        let mut info = make_window(wid.idx.get() as usize);
+        info.sys_id = server.map(WindowServerId::new);
+        info.bundle_id = Some(bundle.to_string());
+        info.title = title.to_string();
+        info.ax_role = Some(role.to_string());
+        info.frame = frame;
+        reactor.state.windows.insert_window(wid, WindowState::from(info));
+    }
+
+    /// Register a launched app in the OS-mirror manager so bundle-keyed pruning can
+    /// resolve a pid to its durable bundle id.
+    fn register_app(reactor: &mut Reactor, pid: pid_t, bundle: &str) {
+        let (tx, _rx) = actor::channel();
+        reactor.app_manager.apps.insert(
+            pid,
+            AppState {
+                info: AppInfo { bundle_id: Some(bundle.to_string()), localized_name: None },
+                handle: AppThreadHandle::new_for_test(tx),
+            },
+        );
+    }
+
     fn sorted(mut v: Vec<WindowId>) -> Vec<WindowId> {
         v.sort();
         v
@@ -683,21 +869,23 @@ mod tests {
     }
 
     #[test]
-    fn adoption_table_prunes_by_pid_and_drains_the_rest() {
+    fn adoption_table_prunes_by_pid_or_bundle_and_drains_the_rest() {
         let mut windows = HashMap::default();
         windows.insert(WindowId::new(1, 1), identity(101));
         windows.insert(WindowId::new(1, 2), identity(102));
         windows.insert(WindowId::new(2, 1), identity(201));
         let mut table = AdoptionTable::from_windows(windows);
 
-        // Per-app prune drops every unclaimed entry whose pre-restart pid matches.
-        let pruned = sorted(table.prune_pid(1));
+        // Plain restart: pids are stable, so pruning by the launched app's pid
+        // drops its entries (bundle unknown -> `None`).
+        let pruned = sorted(table.prune_app(1, None));
         assert_eq!(pruned, vec![WindowId::new(1, 1), WindowId::new(1, 2)]);
         assert_eq!(table.peek(WindowServerId::new(101)), None);
         assert_eq!(table.peek(WindowServerId::new(201)), Some(WindowId::new(2, 1)));
 
-        // The global settle drain empties whatever remains.
-        assert_eq!(sorted(table.drain_all()), vec![WindowId::new(2, 1)]);
+        // Reboot: the surviving entry's pid (2) matches no live app, but its durable
+        // bundle id does — bundle-keyed pruning still reaps it despite the mismatch.
+        assert_eq!(table.prune_app(999, Some("com.example")), vec![WindowId::new(2, 1)]);
         assert!(table.is_empty());
     }
 
@@ -745,6 +933,169 @@ mod tests {
         let dup = WindowId::new(2, 5);
         register_live(&mut reactor, dup, 101);
         assert!(reactor.try_adopt_window(dup, space).is_none(), "claimed entry is not reused");
+    }
+
+    // ---- fuzzy window adoption (reboot) -------------------------------------
+
+    #[test]
+    fn fuzzy_adopts_matching_attributes_when_server_id_changed() {
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        // The pre-reboot engine held this window under old id (1, 1).
+        let old = WindowId::new(1, 1);
+        place_in_engine(&mut reactor, space, &[old]);
+
+        let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.));
+        let mut windows = HashMap::default();
+        // Saved server id 500 will never reappear — the reboot changed them all.
+        windows.insert(old, identity_full(500, "com.foo", "Editor", "AXWindow", frame));
+        reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+
+        // The window returns under a new pid AND a new server id (900), but with the
+        // same durable attributes: fuzzy matching re-adopts it.
+        let live = WindowId::new(2, 1);
+        register_live_full(&mut reactor, live, Some(900), "com.foo", "Editor", "AXWindow", frame);
+        let adopted = reactor.try_adopt_window(live, space);
+        assert!(
+            matches!(adopted, Some(Ok(AppRuleResult::Managed(_)))),
+            "attribute match adopts the window across a server-id change: {adopted:?}",
+        );
+
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        assert!(vwm.workspace_for_window_any(old).is_none(), "old id rewritten away");
+        assert!(vwm.workspace_for_window_any(live).is_some(), "live id inherits the slot");
+
+        // Claim-once: a second identical window finds no unclaimed entry.
+        let dup = WindowId::new(2, 2);
+        register_live_full(&mut reactor, dup, Some(901), "com.foo", "Editor", "AXWindow", frame);
+        assert!(reactor.try_adopt_window(dup, space).is_none(), "claimed entry is not reused");
+    }
+
+    #[test]
+    fn fuzzy_tiebreak_prefers_closest_frame() {
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        let near = WindowId::new(1, 1);
+        let far = WindowId::new(1, 2);
+        place_in_engine(&mut reactor, space, &[near, far]);
+
+        // Two entries agree on every fuzzy attribute but sat at different frames.
+        let near_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.));
+        let far_frame = CGRect::new(CGPoint::new(500., 500.), CGSize::new(100., 100.));
+        let mut windows = HashMap::default();
+        windows.insert(near, identity_full(500, "com.foo", "Doc", "AXWindow", near_frame));
+        windows.insert(far, identity_full(501, "com.foo", "Doc", "AXWindow", far_frame));
+        reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+
+        // The live window's frame is nearest `near_frame`: that candidate wins.
+        let live = WindowId::new(2, 1);
+        register_live_full(
+            &mut reactor,
+            live,
+            Some(900),
+            "com.foo",
+            "Doc",
+            "AXWindow",
+            CGRect::new(CGPoint::new(10., 10.), CGSize::new(100., 100.)),
+        );
+        assert!(reactor.try_adopt_window(live, space).is_some(), "closest-frame candidate adopted");
+
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        assert!(vwm.workspace_for_window_any(near).is_none(), "closest candidate rewritten onto live id");
+        assert!(vwm.workspace_for_window_any(live).is_some());
+        assert!(vwm.workspace_for_window_any(far).is_some(), "the farther candidate stays unclaimed");
+    }
+
+    #[test]
+    fn fuzzy_guards_reject_blank_title_and_missing_bundle() {
+        let space = SpaceId::new(1);
+        let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.));
+
+        // Blank title is too ambiguous (mid-launch terminal/browser) — no match.
+        {
+            let mut reactor = Reactor::new_for_test(fresh_engine());
+            let old = WindowId::new(1, 1);
+            place_in_engine(&mut reactor, space, &[old]);
+            let mut windows = HashMap::default();
+            windows.insert(old, identity_full(500, "com.foo", "", "AXWindow", frame));
+            reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+            let live = WindowId::new(2, 1);
+            register_live_full(&mut reactor, live, Some(900), "com.foo", "", "AXWindow", frame);
+            assert!(reactor.try_adopt_window(live, space).is_none(), "blank title does not fuzzy-match");
+        }
+
+        // A missing bundle id (window has none, no app registered) — no match.
+        {
+            let mut reactor = Reactor::new_for_test(fresh_engine());
+            let old = WindowId::new(1, 1);
+            place_in_engine(&mut reactor, space, &[old]);
+            let mut windows = HashMap::default();
+            windows.insert(old, identity_full(500, "com.foo", "Editor", "AXWindow", frame));
+            reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+            let live = WindowId::new(2, 1);
+            register_live_full(&mut reactor, live, Some(900), "", "Editor", "AXWindow", frame);
+            assert!(
+                reactor.try_adopt_window(live, space).is_none(),
+                "missing bundle id does not fuzzy-match"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_match_beats_fuzzy_candidate() {
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        let by_attr = WindowId::new(1, 1);
+        let by_server = WindowId::new(1, 2);
+        place_in_engine(&mut reactor, space, &[by_attr, by_server]);
+
+        let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.));
+        // Two entries share every fuzzy attribute; they differ only by saved server
+        // id. On frame+discovery-order tiebreak alone, fuzzy would pick `by_attr`.
+        let mut windows = HashMap::default();
+        windows.insert(by_attr, identity_full(500, "com.foo", "Doc", "AXWindow", frame));
+        windows.insert(by_server, identity_full(900, "com.foo", "Doc", "AXWindow", frame));
+        reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+
+        // The live window still carries server id 900 (crash/restart, not reboot): it
+        // must take the exact entry (`by_server`), never the fuzzy one (`by_attr`).
+        let live = WindowId::new(2, 1);
+        register_live_full(&mut reactor, live, Some(900), "com.foo", "Doc", "AXWindow", frame);
+        assert!(reactor.try_adopt_window(live, space).is_some());
+
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        assert!(vwm.workspace_for_window_any(by_server).is_none(), "exact entry claimed and rewritten");
+        assert!(vwm.workspace_for_window_any(live).is_some());
+        assert!(
+            vwm.workspace_for_window_any(by_attr).is_some(),
+            "fuzzy candidate untouched when an exact hit wins"
+        );
+    }
+
+    #[test]
+    fn prune_app_adoptions_keys_on_bundle_after_reboot() {
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        reactor.space_manager.screens = one_screen_snapshots(space);
+        // Pre-reboot the window lived under pid 1.
+        let dead = WindowId::new(1, 1);
+        place_in_engine(&mut reactor, space, &[dead]);
+        let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.));
+        let mut windows = HashMap::default();
+        windows.insert(dead, identity_full(500, "com.reboot", "Gone", "AXWindow", frame));
+        reactor.install_restore_state(AdoptionTable::from_windows(windows), HashMap::default());
+
+        // After a reboot the app relaunches under a NEW pid (7), same bundle, and
+        // never brings this window back. Its discovery pass must still prune the
+        // stale entry, though pid 7 does not equal the entry's pre-restart pid 1.
+        register_app(&mut reactor, 7, "com.reboot");
+        reactor.prune_app_adoptions(7);
+
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        assert!(
+            vwm.workspace_for_window_any(dead).is_none(),
+            "bundle-keyed prune reaps the entry despite the pid change"
+        );
     }
 
     // ---- space remap --------------------------------------------------------
