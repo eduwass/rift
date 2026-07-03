@@ -2709,6 +2709,12 @@ impl Reactor {
             self.space_state.command_space = command_space;
             return Ok(outcome);
         }
+        if display_set_changed
+            && !screens.is_empty()
+            && !self.space_state.screens.is_empty()
+        {
+            self.save_arrangement_before_switch(&screens);
+        }
         if display_set_changed {
             let active_displays: Vec<String> =
                 screens.iter().map(|screen| screen.display_uuid.clone()).collect();
@@ -2734,6 +2740,7 @@ impl Reactor {
         self.refocus_manager.stale_cleanup_state = StaleCleanupState::Enabled;
         self.space_state.screens = screens;
         self.activate_restore_if_ready();
+        self.load_arrangement_after_switch();
         self.remap_restored_spaces();
         if invalidates_pending_targets {
             self.clear_pending_hidden_window_targets();

@@ -25,7 +25,7 @@ use crate::common::debounce::Debouncer;
 use crate::layout_engine::LayoutEngine;
 use crate::layout_engine::snapshot::{Arrangement, Snapshot, WindowIdentity};
 use crate::model::virtual_workspace::{AppRuleAssignment, AppRuleResult, WorkspaceError};
-use crate::sys::screen::SpaceId;
+use crate::sys::screen::{ScreenInfo, SpaceId};
 use crate::sys::window_server::WindowServerId;
 
 /// How long after a layout mutation the debounced save fires.
@@ -112,6 +112,10 @@ pub struct PersistenceState {
     saved_spaces: HashMap<SpaceId, (String, u32)>,
     /// When the global adoption settle timeout expires (armed while adopting).
     settle_deadline: Option<Instant>,
+    /// Display fingerprint the live engine currently belongs to. Set when the
+    /// first arrangement is activated and updated on every arrangement switch;
+    /// a mismatch against the connected display set is what triggers a switch.
+    active_fingerprint: Option<String>,
 }
 
 impl Default for PersistenceState {
@@ -124,6 +128,7 @@ impl Default for PersistenceState {
             adoption: AdoptionTable::default(),
             saved_spaces: HashMap::default(),
             settle_deadline: None,
+            active_fingerprint: None,
         }
     }
 }
@@ -161,7 +166,11 @@ impl Reactor {
             return;
         }
         let now = Instant::now();
-        if self.persistence.debouncer.poll(now) && self.can_persist_now() {
+        // Order matters: while a save is suppressed (topology churn) we must NOT
+        // poll the debouncer, or its pending deadline would be cleared and the
+        // dirty state lost. Checking `can_persist_now` first leaves the deadline
+        // armed so the flush fires on the first tick after the topology settles.
+        if self.can_persist_now() && self.persistence.debouncer.poll(now) {
             self.flush_snapshot();
         }
         if let Some(deadline) = self.persistence.settle_deadline {
@@ -171,24 +180,32 @@ impl Reactor {
         }
     }
 
-    /// Whether it is safe to write a snapshot right now. P1 always allows it; the
-    /// churn-suppression seam for P2 lives here — while `display_topology` is
-    /// churning/awaiting-commit, this should return false so a half-migrated
-    /// arrangement is never persisted (the debouncer stays dirty and flushes on
-    /// settle).
+    /// Whether it is safe to write a snapshot right now. While `display_topology`
+    /// is churning or awaiting its commit snapshot, the engine is mid-migration —
+    /// suppress writes so a half-migrated arrangement is never persisted. The
+    /// debouncer stays dirty and the flush fires on the first tick after settle.
     fn can_persist_now(&self) -> bool {
-        true
+        !crate::sys::display_churn::is_active()
+            && !self.refresh_quarantine_manager.display_churn_active
     }
 
     /// Read-modify-write the on-disk snapshot: preserve arrangements for other
     /// display fingerprints, replace the current one. Best-effort — a failed
     /// write just leaves the previous (≤ debounce-stale) file in place.
     fn flush_snapshot(&mut self) {
+        let fingerprint = self.current_fingerprint();
+        self.flush_snapshot_under(&fingerprint);
+    }
+
+    /// Persist the live engine under an explicit fingerprint, leaving every other
+    /// arrangement in the file untouched. Used by the debounced flush (current
+    /// fingerprint) and by the pre-switch save (the arrangement being left).
+    fn flush_snapshot_under(&mut self, fingerprint: &str) {
         let Some(path) = self.persistence.restore_path.clone() else {
             return;
         };
         let mut snapshot = Snapshot::load_or_default(&path);
-        snapshot.arrangements.insert(self.current_fingerprint(), self.assemble_arrangement());
+        snapshot.arrangements.insert(fingerprint.to_string(), self.assemble_arrangement());
         if let Err(e) = snapshot.save(&path) {
             tracing::warn!("failed to persist layout snapshot to {path:?}: {e}");
         }
@@ -272,15 +289,17 @@ impl Reactor {
         }
     }
 
-    /// Sorted, `+`-joined set of connected display uuids — the arrangement key.
+    /// Fingerprint of the currently connected display set — the arrangement key.
     fn current_fingerprint(&self) -> String {
-        let mut uuids: Vec<String> = self
-            .space_state
-            .screens
-            .iter()
-            .map(|s| s.display_uuid.clone())
-            .filter(|u| !u.is_empty())
-            .collect();
+        Self::fingerprint_of(&self.space_state.screens)
+    }
+
+    /// Sorted, deduped, `+`-joined set of display uuids. The single derivation
+    /// shared by save and switch detection: order-independent, so reordering the
+    /// same displays maps to the same arrangement.
+    pub(super) fn fingerprint_of(screens: &[ScreenInfo]) -> String {
+        let mut uuids: Vec<String> =
+            screens.iter().map(|s| s.display_uuid.clone()).filter(|u| !u.is_empty()).collect();
         uuids.sort();
         uuids.dedup();
         uuids.join("+")
@@ -316,6 +335,10 @@ impl Reactor {
         self.persistence.activated = true;
 
         let fingerprint = self.current_fingerprint();
+        // The engine now belongs to this fingerprint (whether or not a saved
+        // arrangement matched); later screen-parameters events compare against it
+        // to detect an arrangement switch.
+        self.persistence.active_fingerprint = Some(fingerprint.clone());
         let Some(arrangement) = snapshot.arrangements.remove(&fingerprint) else {
             info!("no saved layout arrangement for display fingerprint {fingerprint:?}; starting fresh");
             return;
@@ -349,6 +372,67 @@ impl Reactor {
         if arm_settle {
             self.persistence.settle_deadline = Some(Instant::now() + ADOPTION_SETTLE_TIMEOUT);
         }
+    }
+
+    // ---- arrangement switching ----------------------------------------------
+
+    /// Called at the start of a display-set change, before rift migrates windows
+    /// off the disconnected display(s): persist the still-intact engine under the
+    /// arrangement being left (`old` fingerprint, derived from the *current*
+    /// screens), so replugging can restore it exactly. Synchronous and not
+    /// churn-gated — the point is to capture the pre-migration state.
+    pub(super) fn save_arrangement_before_switch(&mut self, new_screens: &[ScreenInfo]) {
+        if !self.persistence.enabled() {
+            return;
+        }
+        let old_fingerprint = self.current_fingerprint();
+        let new_fingerprint = Self::fingerprint_of(new_screens);
+        if old_fingerprint.is_empty() || old_fingerprint == new_fingerprint {
+            return;
+        }
+        self.flush_snapshot_under(&old_fingerprint);
+    }
+
+    /// Called after the connected display set (and thus the fingerprint) has been
+    /// updated: if it changed and the new arrangement has a saved entry, lift that
+    /// entry into the engine and stage its sidecars for adoption — the same
+    /// machinery as startup restore, but against already-live windows. A missing
+    /// entry leaves rift's default topology migration in charge; either way the
+    /// active fingerprint is updated so the next switch is detected.
+    pub(super) fn load_arrangement_after_switch(&mut self) {
+        if !self.persistence.enabled() {
+            return;
+        }
+        let new_fingerprint = self.current_fingerprint();
+        if new_fingerprint.is_empty() {
+            return;
+        }
+        match self.persistence.active_fingerprint.as_deref() {
+            Some(active) if active == new_fingerprint => return,
+            None => {
+                self.persistence.active_fingerprint = Some(new_fingerprint);
+                return;
+            }
+            Some(_) => {}
+        }
+
+        if let Some(path) = self.persistence.restore_path.clone() {
+            let mut snapshot = Snapshot::load_or_default(&path);
+            if let Some(arrangement) = snapshot.arrangements.remove(&new_fingerprint) {
+                let Arrangement { mut engine, spaces, windows, topmost: _ } = arrangement;
+                engine.rehydrate_restored(
+                    &self.config.virtual_workspaces,
+                    &self.config.settings.layout,
+                    Some(self.communication_manager.event_broadcaster.clone()),
+                );
+                self.layout_manager.layout_engine = engine;
+                self.install_restore_state(AdoptionTable::from_windows(windows), spaces);
+                info!(
+                    "switched to saved layout arrangement for display fingerprint {new_fingerprint:?}"
+                );
+            }
+        }
+        self.persistence.active_fingerprint = Some(new_fingerprint);
     }
 
     /// Resolve saved space identities to live `SpaceId`s and migrate engine state
@@ -471,6 +555,7 @@ impl Reactor {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::time::{Duration, Instant};
 
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
@@ -478,12 +563,13 @@ mod tests {
     use super::{AdoptionTable, WindowIdentity};
     use crate::actor::app::WindowId;
     use crate::actor::reactor::Reactor;
-    use crate::common::collections::HashMap;
+    use crate::common::collections::{HashMap, HashSet};
     use crate::layout_engine::{LayoutEngine, LayoutEvent};
     use crate::model::reactor::WindowState;
     use crate::model::virtual_workspace::AppRuleResult;
     use crate::sys::app::WindowInfo;
     use crate::sys::screen::{ScreenInfo, SpaceId};
+    use crate::sys::skylight::DisplayReconfigFlags;
     use crate::sys::window_server::WindowServerId;
 
     // NOTE: these tests drive the persistence seams directly (engine population +
@@ -533,6 +619,18 @@ mod tests {
         make_screen_snapshots(
             vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
             vec![Some(space)],
+        )
+    }
+
+    /// Two side-by-side test screens: `test-display-0` (space `s1`) and
+    /// `test-display-1` (space `s2`).
+    fn two_screen_snapshots(s1: SpaceId, s2: SpaceId) -> Vec<ScreenInfo> {
+        make_screen_snapshots(
+            vec![
+                CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)),
+                CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)),
+            ],
+            vec![Some(s1), Some(s2)],
         )
     }
 
@@ -740,5 +838,175 @@ mod tests {
         snapshot.save(&path).unwrap();
         let loaded = super::Snapshot::load_or_default(&path);
         assert!(loaded.arrangements.contains_key("test-display-0"), "assembler output is loadable");
+    }
+
+    // ---- arrangement fingerprints (P2) --------------------------------------
+
+    #[test]
+    fn fingerprint_tracks_the_display_set_and_ignores_order() {
+        let two = two_screen_snapshots(SpaceId::new(1), SpaceId::new(2));
+        let one = one_screen_snapshots(SpaceId::new(1));
+
+        // Removing a display yields a different arrangement key.
+        assert_ne!(
+            Reactor::fingerprint_of(&two),
+            Reactor::fingerprint_of(&one),
+            "disconnecting a display changes the fingerprint"
+        );
+
+        // The same set in a different order maps to the same arrangement.
+        let mut reordered = two.clone();
+        reordered.reverse();
+        assert_eq!(
+            Reactor::fingerprint_of(&two),
+            Reactor::fingerprint_of(&reordered),
+            "reordering the same displays is fingerprint-stable"
+        );
+    }
+
+    #[test]
+    fn churn_gate_suppresses_flush_until_topology_settles() {
+        let space = SpaceId::new(1);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        reactor.space_state.screens = one_screen_snapshots(space);
+        let w = WindowId::new(1, 1);
+        place_in_engine(&mut reactor, space, &[w]);
+        register_live(&mut reactor, w, 101);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.ron");
+        reactor.persistence.restore_path = Some(path.clone());
+
+        // Make the debounced save already due (deadline in the past), so the only
+        // thing that can hold it back is the churn gate.
+        reactor.persistence.debouncer.mark_dirty(Instant::now() - Duration::from_secs(10));
+
+        // Enter display churn, then tick: the write is suppressed and the pending
+        // dirty state survives (deadline is NOT consumed).
+        reactor.refresh_quarantine_manager.display_churn_active = true;
+        reactor.persistence_tick();
+        assert!(!path.exists(), "no snapshot written while topology is churning");
+        assert!(reactor.persistence.debouncer.is_dirty(), "the pending flush is preserved");
+
+        // Topology settles: the next tick flushes exactly once and clears dirty.
+        reactor.refresh_quarantine_manager.display_churn_active = false;
+        reactor.persistence_tick();
+        assert!(path.exists(), "the suppressed flush fires once the topology settles");
+        assert!(!reactor.persistence.debouncer.is_dirty(), "flushed exactly once");
+
+        // A further tick does not write again (nothing left pending).
+        reactor.persistence_tick();
+        assert!(!reactor.persistence.debouncer.is_dirty());
+    }
+
+    #[test]
+    fn switching_displays_saves_the_departing_arrangement_and_the_new_one() {
+        let s1 = SpaceId::new(1);
+        let s2 = SpaceId::new(2);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        reactor.space_state.screens = two_screen_snapshots(s1, s2);
+        let wa = WindowId::new(1, 1);
+        let wb = WindowId::new(1, 2);
+        place_in_engine(&mut reactor, s1, &[wa]);
+        place_in_engine(&mut reactor, s2, &[wb]);
+        register_live(&mut reactor, wa, 101);
+        register_live(&mut reactor, wb, 102);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.ron");
+        reactor.persistence.restore_path = Some(path.clone());
+        let fp_two = reactor.current_fingerprint();
+        reactor.persistence.active_fingerprint = Some(fp_two.clone());
+
+        // Switch to a single display. The pre-switch save captures the intact
+        // two-display arrangement; the migrated single-display state is then saved
+        // under its own fingerprint (the debounced writer's job, forced here).
+        let one = one_screen_snapshots(s1);
+        reactor.save_arrangement_before_switch(&one);
+        reactor.space_state.screens = one;
+        reactor.load_arrangement_after_switch();
+        reactor.flush_snapshot();
+
+        let fp_one = reactor.current_fingerprint();
+        let saved = super::Snapshot::load_or_default(&path);
+        assert!(saved.arrangements.contains_key(&fp_two), "departing two-display arrangement saved");
+        assert!(saved.arrangements.contains_key(&fp_one), "new single-display arrangement saved");
+
+        // The departing arrangement kept both windows' durable identities.
+        let servers: BTreeSet<u32> = saved
+            .arrangements
+            .get(&fp_two)
+            .unwrap()
+            .windows
+            .values()
+            .map(|w| w.server_id.as_u32())
+            .collect();
+        assert_eq!(servers, [101, 102].into_iter().collect(), "both windows saved under the old fingerprint");
+    }
+
+    #[test]
+    fn reconnecting_a_display_restores_its_saved_arrangement() {
+        let s1 = SpaceId::new(1);
+        let s2 = SpaceId::new(2);
+        let mut reactor = Reactor::new_for_test(fresh_engine());
+        reactor.space_state.screens = two_screen_snapshots(s1, s2);
+        let wa = WindowId::new(1, 1);
+        let wb = WindowId::new(1, 2);
+        place_in_engine(&mut reactor, s1, &[wa]);
+        place_in_engine(&mut reactor, s2, &[wb]);
+        register_live(&mut reactor, wa, 101);
+        register_live(&mut reactor, wb, 102);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("layout.ron");
+        reactor.persistence.restore_path = Some(path.clone());
+        let fp_two = reactor.current_fingerprint();
+        reactor.persistence.active_fingerprint = Some(fp_two.clone());
+
+        // The two-display arrangement's placement, captured before the round trip.
+        let (orig_a, orig_b) = {
+            let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+            (
+                vwm.workspace_for_window(s1, wa).expect("wa on space1"),
+                vwm.workspace_for_window(s2, wb).expect("wb on space2"),
+            )
+        };
+        reactor.flush_snapshot();
+
+        // Unplug the second display. rift's default migration is simulated here by
+        // dropping to a fresh engine, so a naive reconnect would lose the layout.
+        let one = one_screen_snapshots(s1);
+        reactor.save_arrangement_before_switch(&one);
+        reactor.space_state.screens = one;
+        reactor.layout_manager.layout_engine = fresh_engine();
+        reactor.load_arrangement_after_switch();
+        assert!(
+            reactor
+                .layout_manager
+                .layout_engine
+                .virtual_workspace_manager()
+                .workspace_for_window_any(wa)
+                .is_none(),
+            "two-display state is gone while the display is unplugged"
+        );
+
+        // Replug: the saved two-display arrangement is lifted back into the engine.
+        let two = two_screen_snapshots(s1, s2);
+        reactor.save_arrangement_before_switch(&two);
+        reactor.space_state.screens = two;
+        reactor.load_arrangement_after_switch();
+        reactor.remap_restored_spaces();
+
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        assert_eq!(
+            vwm.workspace_for_window(s1, wa),
+            Some(orig_a),
+            "wa restored to its original workspace on space1"
+        );
+        assert_eq!(
+            vwm.workspace_for_window(s2, wb),
+            Some(orig_b),
+            "wb restored to its original workspace on space2"
+        );
     }
 }
