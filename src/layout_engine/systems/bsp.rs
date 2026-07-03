@@ -214,6 +214,23 @@ impl BspLayoutSystem {
         }
     }
 
+    /// Find the leaf holding `wid` within a specific layout's tree, independent of
+    /// the flat `window_to_node` index (which tracks only one leaf per window even
+    /// when the same window is present in several size-config layouts).
+    fn leaf_for_window_in_layout(
+        &self,
+        layout: crate::layout_engine::LayoutId,
+        wid: WindowId,
+    ) -> Option<NodeId> {
+        let state = self.layouts.get(layout).copied()?;
+        state.root.traverse_preorder(&self.tree.map).find(|node| {
+            matches!(
+                self.kind.get(*node),
+                Some(NodeKind::Leaf { window: Some(w), .. }) if *w == wid
+            )
+        })
+    }
+
     fn make_leaf(&mut self, window: Option<WindowId>) -> NodeId {
         let id = self.tree.mk_node().into_id();
         self.kind.insert(
@@ -956,6 +973,69 @@ mod tests {
         assert_eq!(system.windows_for_app(layout, new.pid), vec![new]);
         assert_eq!(system.windows_for_app(layout, old.pid), vec![sibling]);
     }
+
+    #[test]
+    fn rewrite_window_id_repoints_every_layouts_leaf() {
+        let mut system = BspLayoutSystem::default();
+        let layout_a = system.create_layout();
+        let old = w(1);
+        let sibling = w(2);
+        system.add_window_after_selection(layout_a, old);
+        system.add_window_after_selection(layout_a, sibling);
+
+        // A window lives in one leaf per size-config layout: `WorkspaceLayouts`
+        // clones the layout, and `clone_layout` re-adds each window, overwriting
+        // the single `window_to_node` index so it points at layout B's leaf only.
+        let layout_b = system.clone_layout(layout_a);
+
+        let new = WindowId::new(99, 3);
+        system.rewrite_window_id(old, new);
+
+        // Both layouts must now report the rediscovered id; the non-indexed leaf in
+        // layout A must not keep the dead pre-restart id.
+        assert_eq!(system.windows_for_app(layout_a, new.pid), vec![new], "layout A leaf rewritten");
+        assert_eq!(system.windows_for_app(layout_b, new.pid), vec![new], "layout B leaf rewritten");
+        assert!(
+            !system.windows_for_app(layout_a, old.pid).contains(&old),
+            "no stale old id survives in layout A"
+        );
+        assert!(system.window_to_node.contains_key(&new), "index tracks the new id");
+        assert!(!system.window_to_node.contains_key(&old), "old id gone from index");
+    }
+
+    #[test]
+    fn remove_window_clears_every_layouts_leaf() {
+        let mut system = BspLayoutSystem::default();
+        let layout_a = system.create_layout();
+        let victim = w(1);
+        let sibling = w(2);
+        system.add_window_after_selection(layout_a, victim);
+        system.add_window_after_selection(layout_a, sibling);
+
+        // Second size-config layout: the clone re-adds the windows and steals the
+        // single index, so an index-based removal would only touch layout B.
+        let layout_b = system.clone_layout(layout_a);
+
+        system.remove_window(victim);
+
+        assert!(
+            !system.windows_for_app(layout_a, victim.pid).contains(&victim),
+            "victim removed from layout A"
+        );
+        assert!(
+            !system.windows_for_app(layout_b, victim.pid).contains(&victim),
+            "victim removed from layout B"
+        );
+        assert!(
+            system.windows_for_app(layout_a, sibling.pid).contains(&sibling),
+            "sibling kept in layout A"
+        );
+        assert!(
+            system.windows_for_app(layout_b, sibling.pid).contains(&sibling),
+            "sibling kept in layout B"
+        );
+        assert!(!system.window_to_node.contains_key(&victim), "victim gone from index");
+    }
 }
 
 impl LayoutSystem for BspLayoutSystem {
@@ -1135,16 +1215,20 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn remove_window(&mut self, wid: WindowId) {
-        if let Some(node_id) = self.node_for_window_mut(wid) {
-            let root = self.find_layout_root(node_id);
-            let layout = self
-                .layouts
-                .iter()
-                .find_map(|(id, s)| if s.root == root { Some(id) } else { None });
-            if let Some(l) = layout {
-                self.remove_window_internal(l, wid);
+        // The window may occupy one leaf per size-config layout (see `clone_layout`),
+        // while `window_to_node` tracks only the indexed one. Remove it from every
+        // layout so a pruned window can't linger in a non-active layout and reappear
+        // when that size config next becomes active.
+        let layouts: Vec<_> = self.layouts.keys().collect();
+        for layout in layouts {
+            if let Some(node) = self.leaf_for_window_in_layout(layout, wid) {
+                // Re-point the single index at this layout's leaf so the index-based
+                // internal removal (and its selection fix-up) targets it.
+                self.window_to_node.insert(wid, node);
+                self.remove_window_internal(layout, wid);
             }
         }
+        self.unindex_window(wid);
     }
 
     fn remove_windows_for_app(&mut self, pid: pid_t) {
@@ -1159,11 +1243,21 @@ impl LayoutSystem for BspLayoutSystem {
         if old == new {
             return;
         }
-        if let Some(node) = self.window_to_node.remove(&old) {
-            self.window_to_node.insert(new, node);
-            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node) {
-                *window = Some(new);
+        // A window holds one leaf per size-config layout (see `clone_layout`), but
+        // `window_to_node` tracks only the most recently indexed leaf. Repoint
+        // every leaf carrying `old` across all layouts, not just the indexed one,
+        // so no dead pre-restart id survives in a non-indexed layout.
+        let mut rewritten_leaf = None;
+        for (node, kind) in self.kind.iter_mut() {
+            if let NodeKind::Leaf { window: Some(w), .. } = kind {
+                if *w == old {
+                    *w = new;
+                    rewritten_leaf = Some(node);
+                }
             }
+        }
+        if let Some(node) = self.window_to_node.remove(&old).or(rewritten_leaf) {
+            self.window_to_node.insert(new, node);
         }
     }
 
