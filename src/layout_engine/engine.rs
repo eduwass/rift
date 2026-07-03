@@ -2331,17 +2331,71 @@ impl LayoutEngine {
         }
     }
 
-    pub fn load(_path: PathBuf) -> anyhow::Result<Self> {
-        Ok(Self::new(
-            &VirtualWorkspaceSettings::default(),
-            &LayoutSettings::default(),
-            None,
-        ))
+    /// Load a persisted engine from `path`, rehydrating the `#[serde(skip)]`
+    /// runtime/config fields from the supplied settings. Any failure — missing
+    /// file, read error, or parse error — falls back to a fresh engine, so this
+    /// never panics and never leaves the WM worse off than a cold start.
+    pub fn load(
+        path: PathBuf,
+        virtual_workspace_config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+        broadcast_tx: Option<BroadcastSender>,
+    ) -> Self {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match ron::from_str::<LayoutEngine>(&contents) {
+                Ok(mut engine) => {
+                    engine.rehydrate(virtual_workspace_config, layout_settings, broadcast_tx);
+                    engine
+                }
+                Err(e) => {
+                    warn!("failed to parse layout snapshot at {path:?}: {e}; starting fresh");
+                    Self::new(virtual_workspace_config, layout_settings, broadcast_tx)
+                }
+            },
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!("failed to read layout snapshot at {path:?}: {e}; starting fresh");
+                }
+                Self::new(virtual_workspace_config, layout_settings, broadcast_tx)
+            }
+        }
     }
 
-    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> { Ok(()) }
+    /// Repopulate the `#[serde(skip)]` fields that deserialize to defaults:
+    /// live handles (`broadcast_tx`), config-derived settings, and the virtual
+    /// workspace manager's config-backed caches. Mirrors what `new` wires up.
+    fn rehydrate(
+        &mut self,
+        virtual_workspace_config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+        broadcast_tx: Option<BroadcastSender>,
+    ) {
+        self.layout_settings = layout_settings.clone();
+        self.broadcast_tx = broadcast_tx;
+        self.virtual_workspace_manager
+            .rehydrate_after_load(virtual_workspace_config, layout_settings);
+    }
+
+    pub fn save(&self, path: PathBuf) -> std::io::Result<()> {
+        // Phase 0 persists the bare engine; Phase 1 wraps it in a `Snapshot`
+        // arrangement and reuses the same atomic writer.
+        crate::layout_engine::snapshot::write_atomic(&path, &self.serialize_to_string())
+    }
 
     pub fn serialize_to_string(&self) -> String { ron::ser::to_string(&self).unwrap() }
+
+    /// Deserialize an engine from a ron string, rehydrating skip fields. Used by
+    /// [`LayoutEngine::load`] and by roundtrip tests.
+    #[cfg(test)]
+    pub(crate) fn deserialize_from_str(
+        contents: &str,
+        virtual_workspace_config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+    ) -> anyhow::Result<Self> {
+        let mut engine: LayoutEngine = ron::from_str(contents)?;
+        engine.rehydrate(virtual_workspace_config, layout_settings, None);
+        Ok(engine)
+    }
 
     pub fn focused_window(&self) -> Option<WindowId> {
         self.focused_window
@@ -4066,6 +4120,7 @@ mod tests {
             before
         );
     }
+    }
 
     #[test]
     fn workspace_switch_only_commits_focus_after_authoritative_commit() {
@@ -4210,5 +4265,140 @@ mod tests {
             engine.virtual_workspace_manager.workspace_windows(&window_store, space, ws2),
             vec![wid]
         );
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_layout() {
+        let mut window_store = WindowStore::default();
+        let mut engine = test_engine();
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 1000.0));
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+
+        let w1 = WindowId::new(1, 1);
+        let w2 = WindowId::new(1, 2);
+        let w3 = WindowId::new(2, 1);
+        let w4 = WindowId::new(3, 1);
+        let windows = [w1, w2, w3, w4];
+
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowsOnScreenUpdated(
+                space,
+                1,
+                vec![window_info(w1), window_info(w2)],
+                None,
+            ),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowsOnScreenUpdated(space, 2, vec![window_info(w3)], None),
+        );
+
+        engine.ensure_window_floating(space, w3);
+
+        let workspaces = engine.virtual_workspace_manager_mut().list_workspaces(space);
+        let ws0 = workspaces[0].0;
+        let ws1 = workspaces[1].0;
+        engine.virtual_workspace_manager_mut().rename_workspace(space, ws0, "Code".into());
+        engine.virtual_workspace_manager_mut().rename_workspace(space, ws1, "Web".into());
+
+        let _ = engine.handle_virtual_workspace_command(
+            &mut window_store,
+            space,
+            &LayoutCommand::SwitchToWorkspace(1),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowsOnScreenUpdated(space, 3, vec![window_info(w4)], None),
+        );
+        let _ = engine.handle_virtual_workspace_command(
+            &mut window_store,
+            space,
+            &LayoutCommand::SwitchToWorkspace(0),
+        );
+
+        let gaps = engine.layout_settings.gaps.clone();
+        let names_before: Vec<String> = engine
+            .virtual_workspace_manager_mut()
+            .list_workspaces(space)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        let layout_before = engine.calculate_layout(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let float_before: Vec<bool> =
+            windows.iter().map(|w| engine.is_window_floating(*w)).collect();
+        let mapping_before: Vec<_> = windows
+            .iter()
+            .map(|w| engine.virtual_workspace_manager().workspace_for_window_any(*w))
+            .collect();
+
+        let serialized = engine.serialize_to_string();
+        let mut restored = LayoutEngine::deserialize_from_str(
+            &serialized,
+            &VirtualWorkspaceSettings::default(),
+            &LayoutSettings::default(),
+        )
+        .expect("engine should deserialize");
+
+        let names_after: Vec<String> = restored
+            .virtual_workspace_manager_mut()
+            .list_workspaces(space)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        let layout_after = restored.calculate_layout(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let float_after: Vec<bool> =
+            windows.iter().map(|w| restored.is_window_floating(*w)).collect();
+        let mapping_after: Vec<_> = windows
+            .iter()
+            .map(|w| restored.virtual_workspace_manager().workspace_for_window_any(*w))
+            .collect();
+
+        assert_eq!(names_before, names_after, "workspace names survive the roundtrip");
+        assert!(
+            names_after.contains(&"Code".to_string()) && names_after.contains(&"Web".to_string()),
+            "custom names present after restore: {names_after:?}"
+        );
+        assert_eq!(
+            layout_before, layout_after,
+            "tree structure, window order, and split ratios survive the roundtrip"
+        );
+        assert_eq!(float_before, float_after, "floating set survives the roundtrip");
+        assert_eq!(
+            vec![false, false, true, false],
+            float_after,
+            "only the floated window is floating after restore"
+        );
+        assert_eq!(
+            mapping_before, mapping_after,
+            "window->workspace mapping survives the roundtrip"
+        );
+    }
+
+    #[test]
+    fn engine_serialization_schema_stability() {
+        let serialized = test_engine().serialize_to_string();
+        for key in ["workspace_layouts", "floating", "virtual_workspace_manager"] {
+            assert!(
+                serialized.contains(key),
+                "engine serialization missing wire key {key:?}: {serialized}"
+            );
+        }
     }
 }

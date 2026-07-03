@@ -175,11 +175,16 @@ impl WorkspaceStore {
         Self::new_with_config(&VirtualWorkspaceSettings::default(), &LayoutSettings::default())
     }
 
+    /// Upper bound on workspaces per space. Seeded by `new_with_config`; because
+    /// it is `#[serde(skip)]`, [`Self::rehydrate_after_load`] must restore it
+    /// before any `update_settings` call (which does arithmetic against it).
+    const MAX_WORKSPACES: usize = 32;
+
     pub fn new_with_config(
         config: &VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
     ) -> Self {
-        let max_workspaces = 32;
+        let max_workspaces = Self::MAX_WORKSPACES;
         let target_count = config.default_workspace_count.max(1).min(max_workspaces);
         let default_workspace = config.default_workspace.min(target_count - 1);
 
@@ -200,6 +205,19 @@ impl WorkspaceStore {
             default_layout_mode: layout_settings.mode,
             layout_settings: layout_settings.clone(),
         }
+    }
+
+    /// Restore the `#[serde(skip)]` config fields after deserialization. Seeds
+    /// the fields that only `new_with_config` (not `update_settings`) sets —
+    /// notably `max_workspaces`, which `update_settings` divides against — then
+    /// applies the live config over the restored per-space state.
+    pub fn rehydrate_after_load(
+        &mut self,
+        config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+    ) {
+        self.max_workspaces = Self::MAX_WORKSPACES;
+        self.update_settings(config, layout_settings);
     }
 
     pub fn update_settings(
