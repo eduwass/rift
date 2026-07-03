@@ -1,7 +1,7 @@
 use tracing::{error, info, warn};
 
 use super::super::ScreenInfo;
-use crate::actor::app::{AppThreadHandle, Quiet, WindowId};
+use crate::actor::app::{AppThreadHandle, Quiet, RaiseKind, WindowId};
 use crate::actor::raise_manager;
 use crate::actor::reactor::WorkspaceSwitchOrigin;
 use crate::actor::reactor::events::EventOutcome;
@@ -315,6 +315,7 @@ pub fn handle_command_reactor_focus_window(
             focus_window: Some((window_id, None)),
             app_handles,
             focus_quiet: Quiet::No,
+            kind: RaiseKind::Focus,
         });
         outcome = outcome.with_raise_request(request);
     } else if let Some(wsid) = window_server_id {
@@ -381,6 +382,7 @@ pub fn handle_command_reactor_move_window_to_display(
             focus_window: Some((payload.window, None)),
             app_handles,
             focus_quiet: Quiet::No,
+            kind: RaiseKind::Focus,
         }))
         .with_pending_display_move_warp(
             payload.window,

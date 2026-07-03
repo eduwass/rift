@@ -59,6 +59,7 @@ pub enum ReactorCommand {
     CloseWindow {
         window_server_id: Option<WindowServerId>,
     },
+    ToggleTopmostWindow,
     MoveWindowToDisplay {
         selector: DisplaySelector,
         window_id: Option<u32>,

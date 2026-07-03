@@ -382,6 +382,12 @@ pub struct Settings {
     /// Accepts either a full hotkey (e.g. "Ctrl + A") or a modifier-only spec (e.g. "Ctrl")
     #[serde(default)]
     pub focus_follows_mouse_disable_hotkey: Option<HotkeySpec>,
+    /// When true, every floating window gets topmost (pinned) behavior by
+    /// default: it stays above tiled/background windows, yielding only to the
+    /// focused window while that window holds focus. `toggle-topmost` then
+    /// acts as a per-window opt-out instead of an opt-in.
+    #[serde(default)]
+    pub floating_windows_topmost: bool,
     /// Apps that should not trigger automatic workspace switching when activated.
     /// List of bundle identifiers (e.g., "com.apple.Spotlight") that often
     /// inappropriately steal focus and shouldn't cause workspace switches.

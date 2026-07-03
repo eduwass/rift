@@ -33,6 +33,7 @@ pub struct WorkspaceLayoutData {
 pub struct WindowData {
     pub id: WindowId,
     pub is_floating: bool,
+    pub is_topmost: bool,
     pub is_focused: bool,
     pub app_name: Option<String>,
     pub info: WindowInfo,
@@ -80,6 +81,7 @@ impl Serialize for WindowData {
             #[serde_as(as = "CGRectDef")]
             frame: &'a objc2_core_foundation::CGRect,
             is_floating: bool,
+            is_topmost: bool,
             is_focused: bool,
             bundle_id: Option<&'a String>,
             app_name: Option<&'a String>,
@@ -91,6 +93,7 @@ impl Serialize for WindowData {
             title: &self.info.title,
             frame: &self.info.frame,
             is_floating: self.is_floating,
+            is_topmost: self.is_topmost,
             is_focused: self.is_focused,
             bundle_id: self.info.bundle_id.as_ref(),
             app_name: self.app_name.as_ref(),
@@ -112,6 +115,7 @@ impl<'de> Deserialize<'de> for WindowData {
             #[serde_as(as = "CGRectDef")]
             frame: objc2_core_foundation::CGRect,
             is_floating: bool,
+            is_topmost: bool,
             is_focused: bool,
             bundle_id: Option<String>,
             app_name: Option<String>,
@@ -138,6 +142,7 @@ impl<'de> Deserialize<'de> for WindowData {
         Ok(WindowData {
             id: helper.id,
             is_floating: helper.is_floating,
+            is_topmost: helper.is_topmost,
             is_focused: helper.is_focused,
             app_name: helper.app_name,
             info,
@@ -243,6 +248,7 @@ mod tests {
         let data = WindowData {
             id: WindowId::new(123, 7),
             is_floating: true,
+            is_topmost: true,
             is_focused: false,
             app_name: Some("Test App".to_string()),
             info,
@@ -254,6 +260,7 @@ mod tests {
             "title": "Test",
             "frame": { "origin": { "x": 1.0, "y": 2.0 }, "size": { "width": 3.0, "height": 4.0 } },
             "is_floating": true,
+            "is_topmost": true,
             "is_focused": false,
             "bundle_id": "com.example.test",
             "app_name": "Test App",

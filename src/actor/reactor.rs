@@ -65,6 +65,7 @@ mod SpaceEventHandler {
 mod tests;
 
 use std::thread;
+use std::time::{Duration, Instant};
 
 use animation::Sender as AnimationSender;
 use dispatchr::queue;
@@ -81,11 +82,11 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use tracing::{debug, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 use transaction_manager::TransactionId;
 
 use super::{event_tap, gesture_tap};
-use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
+use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, RaiseKind, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery;
 use crate::actor::spaces::{ForwardedSpaceState, TopologyWindowDelta};
@@ -108,6 +109,24 @@ use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, window_level,
     window_sub_level,
 };
+
+pub(crate) fn topmost_sample_points(frame: CGRect) -> [CGPoint; 5] {
+    let min_x = frame.origin.x;
+    let min_y = frame.origin.y;
+    let max_x = frame.origin.x + frame.size.width;
+    let max_y = frame.origin.y + frame.size.height;
+    let mid_x = frame.origin.x + frame.size.width / 2.0;
+    let mid_y = frame.origin.y + frame.size.height / 2.0;
+    let inset_x = (frame.size.width / 4.0).min(24.0);
+    let inset_y = (frame.size.height / 4.0).min(24.0);
+    [
+        CGPoint::new(mid_x, mid_y),
+        CGPoint::new(min_x + inset_x, min_y + inset_y),
+        CGPoint::new(max_x - inset_x, min_y + inset_y),
+        CGPoint::new(min_x + inset_x, max_y - inset_y),
+        CGPoint::new(max_x - inset_x, max_y - inset_y),
+    ]
+}
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
@@ -235,6 +254,7 @@ pub enum Event {
     /// `after`) by the move handler and fires once the window has certainly landed on the target
     /// display, where a forced re-tile is no longer clamped and sticks.
     ReassertDisplayMove(WindowId),
+    ReassertTopmost,
 
     /// Periodic tick: reclaim space from windows that closed without notifying rift
     /// (see [`Reactor::reconcile_orphan_windows`]).
@@ -251,6 +271,10 @@ pub enum Event {
     /// FIXME: This can be interleaved incorrectly with the MouseState in app
     /// actor events.
     MouseUp,
+    /// A mouse button was pressed. Used as an early topmost-reassert trigger:
+    /// the system's click-raise (which can bury a pinned window) happens on
+    /// mouse-down, well before mouse-up.
+    MouseDown,
     /// Sent by the event tap only when the cursor enters a different window.
     /// Window resolution and transition deduplication stay on the input
     /// thread; the reactor only applies the model-dependent focus/raise work.
@@ -335,7 +359,25 @@ pub struct Reactor {
     // async) and focus-follows-mouse then steals focus. Holds (window, destination display rect,
     // deadline) and fires once the window's centre is inside that rect or the deadline passes.
     pending_display_move_warp: Option<(WindowId, CGRect, std::time::Instant)>,
+    topmost_windows: HashMap<WindowId, TopmostWindowState>,
+    /// Windows explicitly un-pinned via toggle-topmost while
+    /// `floating_windows_topmost` is on, so the float sweep doesn't re-pin them.
+    topmost_optout: HashSet<WindowId>,
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TopmostWindowState {
+    last_reassert: Option<Instant>,
+    failed_reasserts: u8,
+    /// True when the pin came from `floating_windows_topmost` rather than an
+    /// explicit toggle; implicit pins follow the window's floating state.
+    implicit: bool,
+}
+
+const TOPMOST_REASSERT_DEBOUNCE: Duration = Duration::from_millis(200);
+/// Raise attempts per burial episode: 1 order-only + 2 escalations, then wait
+/// for the next user-driven trigger. Never unpins.
+const TOPMOST_MAX_FAILED_REASSERTS: u8 = 3;
 
 impl Reactor {
     pub fn spawn(
@@ -458,6 +500,8 @@ impl Reactor {
             active_spaces: HashSet::default(),
             animation_tx: None,
             pending_display_move_warp: None,
+            topmost_windows: HashMap::default(),
+            topmost_optout: HashSet::default(),
         };
         reactor
     }
@@ -991,7 +1035,8 @@ impl Reactor {
 
     fn log_event(&self, event: &Event) {
         match event {
-            Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseMoved(_) | Event::CursorMoved => {
+            Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseDown
+                | Event::MouseMoved(_) | Event::CursorMoved => {
                 trace!(?event, "Event")
             }
             _ => debug!(?event, "Event"),
@@ -1092,9 +1137,24 @@ impl Reactor {
 
     #[instrument(name = "reactor::handle_event", skip(self), fields(event=?event))]
     fn handle_event(&mut self, event: Event) {
+        let should_reassert_topmost = matches!(
+            &event,
+            Event::ApplicationActivated(_, _)
+                | Event::ApplicationMainWindowChanged(_, _, _)
+                | Event::MouseMoved(_)
+                | Event::MouseUp
+                | Event::MouseDown
+        );
+        let schedule_topmost_verification = matches!(&event, Event::RaiseCompleted { .. });
         match self.dispatch_workflow(event) {
             Ok(outcome) => self.apply_event_outcome(outcome),
             Err(error) => warn!(%error, "reactor workflow failed"),
+        }
+        if schedule_topmost_verification {
+            self.schedule_topmost_verification();
+        }
+        if should_reassert_topmost {
+            self.schedule_topmost_reassert();
         }
     }
 
@@ -1282,6 +1342,8 @@ impl Reactor {
                         platform_window_alive,
                     },
                 )?;
+                self.topmost_windows.remove(&wid);
+                self.topmost_optout.remove(&wid);
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
@@ -1364,6 +1426,7 @@ impl Reactor {
                 );
             }
             Event::WindowMinimized(wid) => {
+                self.topmost_windows.remove(&wid);
                 return window_workflow::handle_window_minimized(&mut self.state, wid);
             }
             Event::WindowDeminiaturized(wid) => {
@@ -1484,6 +1547,7 @@ impl Reactor {
                 }
                 return Ok(outcome);
             }
+            Event::MouseDown => {}
             Event::MouseUp => {
                 let pending_swap = self.get_pending_drag_swap();
                 let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(true);
@@ -1662,6 +1726,10 @@ impl Reactor {
             }
             Event::Command(Command::Reactor(ReactorCommand::CloseWindow { window_server_id })) => {
                 return command_workflow::handle_close_window(window_server_id);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::ToggleTopmostWindow)) => {
+                self.handle_toggle_topmost_window();
+                return Ok(EventOutcome::finalized_event(None, false, false, false));
             }
             Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
                 window_id,
@@ -1871,6 +1939,10 @@ impl Reactor {
                     &self.transaction_manager,
                     window_id,
                 );
+            }
+            Event::ReassertTopmost => {
+                self.reassert_topmost_windows(None);
+                return Ok(EventOutcome::default());
             }
             Event::ApplicationMainWindowChanged(pid, _, _) => {
                 if self.app_manager.apps.contains_key(&pid) {
@@ -2240,6 +2312,7 @@ impl Reactor {
         Some(WindowData {
             id: window_id,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
+            is_topmost: self.topmost_windows.contains_key(&window_id),
             is_focused: self.main_window() == Some(window_id),
             app_name,
             info: WindowInfo {
@@ -3316,6 +3389,254 @@ impl Reactor {
         }
     }
 
+    fn topmost_feature_active(&self) -> bool {
+        !self.topmost_windows.is_empty() || self.config.settings.floating_windows_topmost
+    }
+
+    fn schedule_topmost_reassert(&mut self) {
+        if !self.topmost_feature_active() {
+            return;
+        }
+        for state in self.topmost_windows.values_mut() {
+            state.failed_reasserts =
+                state.failed_reasserts.min(TOPMOST_MAX_FAILED_REASSERTS - 1);
+        }
+        self.schedule_topmost_verification();
+    }
+
+    fn schedule_topmost_verification(&self) {
+        if !self.topmost_feature_active() {
+            return;
+        }
+        let Some(events_tx) = self.communication_manager.events_tx.clone() else {
+            return;
+        };
+        for delay_ms in [60i64, 120, 260, 500] {
+            let events_tx = events_tx.clone();
+            queue::main().after_f_s(
+                Time::new_after(Time::NOW, delay_ms * 1_000_000),
+                events_tx,
+                |events_tx| {
+                    events_tx.send(Event::ReassertTopmost);
+                },
+            );
+        }
+    }
+
+    fn handle_toggle_topmost_window(&mut self) {
+        let focused = self
+            .layout_manager
+            .layout_engine
+            .focused_window()
+            .or_else(|| self.main_window());
+        let cursor_floating = self.window_id_under_cursor().filter(|wid| {
+            self.layout_manager.layout_engine.is_window_floating(*wid)
+        });
+        let only_floating = self.workspace_command_space().and_then(|space| {
+            let floating: Vec<_> = self
+                .layout_manager
+                .layout_engine
+                .windows_in_active_workspace(&self.state.windows, space)
+                .into_iter()
+                .filter(|wid| self.layout_manager.layout_engine.is_window_floating(*wid))
+                .collect();
+            (floating.len() == 1).then_some(floating[0])
+        });
+        let window_id = focused
+            .filter(|wid| self.layout_manager.layout_engine.is_window_floating(*wid))
+            .or(cursor_floating)
+            .or(only_floating)
+            .or(focused);
+        let Some(window_id) = window_id else {
+            warn!("Toggle topmost ignored: no focused, hovered, or floating window");
+            return;
+        };
+        if self.state.windows.window(window_id).is_none() {
+            warn!(?window_id, "Toggle topmost ignored: unknown window");
+            return;
+        }
+
+        self.toggle_topmost_window(window_id);
+    }
+
+    pub(crate) fn toggle_topmost_window(&mut self, wid: WindowId) {
+        if self.topmost_windows.remove(&wid).is_some() {
+            if self.config.settings.floating_windows_topmost {
+                self.topmost_optout.insert(wid);
+            }
+            info!(?wid, "Unpinned topmost window");
+            return;
+        }
+
+        self.topmost_optout.remove(&wid);
+        self.topmost_windows.insert(wid, TopmostWindowState::default());
+        info!(?wid, "Pinned topmost window");
+        self.raise_topmost_windows(vec![wid]);
+    }
+
+    fn sync_floating_topmost(&mut self) {
+        if !self.config.settings.floating_windows_topmost {
+            return;
+        }
+        self.topmost_optout
+            .retain(|wid| self.state.windows.window(*wid).is_some());
+
+        let spaces: Vec<SpaceId> = self
+            .space_state
+            .screens
+            .iter()
+            .filter_map(|screen| screen.space)
+            .filter(|space| self.is_space_active(*space))
+            .collect();
+        let mut floating: HashSet<WindowId> = HashSet::default();
+        for space in spaces {
+            for wid in self
+                .layout_manager
+                .layout_engine
+                .windows_in_active_workspace(&self.state.windows, space)
+            {
+                if self.layout_manager.layout_engine.is_window_floating(wid) {
+                    floating.insert(wid);
+                }
+            }
+        }
+
+        self.topmost_windows
+            .retain(|wid, state| !state.implicit || floating.contains(wid));
+        for wid in floating {
+            if !self.topmost_optout.contains(&wid) {
+                self.topmost_windows.entry(wid).or_insert(TopmostWindowState {
+                    implicit: true,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    fn reassert_topmost_windows(&mut self, except: Option<WindowId>) {
+        if crate::sys::display_churn::is_active()
+            || self.refresh_quarantine_manager.display_churn_active
+            || !matches!(
+                self.workspace_switch_manager.workspace_switch_state,
+                WorkspaceSwitchState::Inactive
+            )
+        {
+            return;
+        }
+
+        self.sync_floating_topmost();
+
+        let now = Instant::now();
+        let candidates: Vec<WindowId> = self.topmost_windows.keys().copied().collect();
+        let mut order_only = Vec::new();
+
+        for wid in candidates {
+            if Some(wid) == except || !self.is_window_on_active_space(wid) {
+                continue;
+            }
+            let Some(state) = self.topmost_windows.get(&wid).copied() else {
+                continue;
+            };
+            if state
+                .last_reassert
+                .is_some_and(|last| now.duration_since(last) < TOPMOST_REASSERT_DEBOUNCE)
+            {
+                continue;
+            }
+            let Some(burier) = self.topmost_burier(wid) else {
+                if let Some(state) = self.topmost_windows.get_mut(&wid) {
+                    if state.failed_reasserts != 0 {
+                        info!(
+                            ?wid,
+                            after_attempts = state.failed_reasserts,
+                            "Topmost window surfaced; resetting reassert counter"
+                        );
+                    }
+                    state.failed_reasserts = 0;
+                }
+                continue;
+            };
+            let burier_wid = self.state.windows.tracked_window_id(burier);
+            if burier_wid.is_some() && burier_wid == self.main_window() {
+                if let Some(state) = self.topmost_windows.get_mut(&wid) {
+                    state.failed_reasserts = 0;
+                }
+                continue;
+            }
+            if state.failed_reasserts >= TOPMOST_MAX_FAILED_REASSERTS {
+                debug!(?wid, "Topmost reassert attempts exhausted; awaiting next trigger");
+                continue;
+            }
+
+            if let Some(s) = self.topmost_windows.get_mut(&wid) {
+                s.last_reassert = Some(now);
+                s.failed_reasserts += 1;
+            }
+            info!(
+                ?wid,
+                attempts = state.failed_reasserts,
+                burier = burier.as_u32(),
+                "Topmost window buried by unfocused window; sending order-only raise"
+            );
+            order_only.push(wid);
+        }
+
+        self.raise_topmost_windows(order_only);
+    }
+
+    fn raise_topmost_windows(&mut self, windows: Vec<WindowId>) {
+        if windows.is_empty() {
+            return;
+        }
+
+        let mut app_handles = HashMap::default();
+        let raise_windows: Vec<Vec<WindowId>> = windows
+            .into_iter()
+            .filter(|wid| {
+                self.insert_app_handle_for_window(&mut app_handles, *wid);
+                app_handles.contains_key(&wid.pid)
+            })
+            .map(|wid| vec![wid])
+            .collect();
+        if raise_windows.is_empty() {
+            return;
+        }
+
+        let msg = raise_manager::Event::RaiseRequest(RaiseRequest {
+            raise_windows,
+            focus_window: None,
+            app_handles,
+            focus_quiet: Quiet::Yes,
+            kind: RaiseKind::OrderOnly,
+        });
+        if let Err(e) = self.communication_manager.raise_manager_tx.try_send(msg) {
+            warn!("Failed to send order-only topmost raise request: {}", e);
+        }
+    }
+
+    fn topmost_burier(&self, wid: WindowId) -> Option<WindowServerId> {
+        let window = self.state.windows.window(wid)?;
+        let wsid = window.info.sys_id?;
+        if !self.state.windows.is_window_visible(wsid) {
+            return None;
+        }
+
+        let frame = window_server::get_window(wsid)
+            .map(|info| info.frame)
+            .unwrap_or(window.info.frame);
+        let points = topmost_sample_points(frame);
+
+        points.iter().find_map(|point| {
+            let hit = window_server::get_window_at_point(*point)?;
+            (hit != wsid
+                && !self.topmost_windows.keys().any(|topmost| {
+                    self.state.windows.window(*topmost).and_then(|state| state.info.sys_id)
+                        == Some(hit)
+                }))
+            .then_some(hit)
+        })
+    }
+
     pub fn warp_mouse(&mut self, point: CGPoint) {
         let Some(event_tap_tx) = self.communication_manager.event_tap_tx.clone() else {
             return;
@@ -3513,6 +3834,10 @@ impl Reactor {
             wid,
         ) {
             trace!("Ignoring mouse over window {:?} - not in active workspace", wid);
+            return false;
+        }
+
+        if self.topmost_windows.contains_key(&wid) {
             return false;
         }
 
@@ -4153,6 +4478,7 @@ impl Reactor {
             focus_window: focus_window_with_warp,
             app_handles,
             focus_quiet,
+            kind: RaiseKind::Focus,
         });
 
         if let Err(e) = self.communication_manager.raise_manager_tx.try_send(msg) {
