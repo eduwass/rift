@@ -666,6 +666,7 @@ impl Reactor {
     }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     fn orphan_reconcile_outcome(&mut self) -> EventOutcome {
         let mut outcome = EventOutcome::finalized_event(None, false, false, false);
 ||||||| parent of 5fdc286 (fix: reap minimized windows for dead apps)
@@ -691,6 +692,34 @@ impl Reactor {
     /// (legitimately off screen) never trigger work.
     fn reconcile_orphan_windows(&mut self) {
 =======
+||||||| parent of 65f78a9 (fix: recover app actors from visible windows)
+=======
+    fn recover_missing_app_actors_from_visible_windows(&mut self) {
+        let Some(wm_sender) = self.communication_manager.wm_sender.as_ref() else {
+            return;
+        };
+
+        let mut missing_pids: HashSet<pid_t> = HashSet::default();
+        for info in self.authoritative_window_snapshot_for_active_spaces() {
+            if info.layer != 0 || self.app_manager.apps.contains_key(&info.pid) {
+                continue;
+            }
+            missing_pids.insert(info.pid);
+        }
+
+        for pid in missing_pids {
+            let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
+                continue;
+            };
+            warn!(pid, "recovering missing app actor from visible WindowServer window");
+            wm_sender.send(crate::actor::wm_controller::WmEvent::AppLaunch(
+                pid,
+                AppInfo::from(&*app),
+            ));
+        }
+    }
+
+>>>>>>> 65f78a9 (fix: recover app actors from visible windows)
     /// Re-query an app's visible windows so the stale-window reconciliation in
     /// `WindowsDiscovered` can reap any window AX/the window server no longer reports.
     /// Called from the focus/main-window-change paths for a fast reap in the common
@@ -724,6 +753,8 @@ impl Reactor {
         if self.is_mission_control_active() || self.is_in_drag() {
             return outcome;
         }
+        self.recover_missing_app_actors_from_visible_windows();
+
         let mut tracked_pids: HashSet<pid_t> = self.app_manager.apps.keys().copied().collect();
         tracked_pids.extend(self.window_manager.windows.keys().map(|wid| wid.pid));
         let mut dead_pids: HashSet<pid_t> = HashSet::default();
