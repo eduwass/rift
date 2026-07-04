@@ -5063,6 +5063,7 @@ fn display_churn_end_refresh_is_idempotent_without_topology_change() {
         "idempotent churn-end refresh should not trigger follow-up frame writes when nothing moved"
     );
 }
+<<<<<<< HEAD
 
 #[test]
 fn display_churn_end_refresh_preserves_non_default_workspace_without_app_rules() {
@@ -5736,3 +5737,62 @@ fn native_space_resolution_policy_table() {
         assert_eq!(resolved, expected, "resolver case: {case}");
     }
 }
+||||||| parent of 5fdc286 (fix: reap minimized windows for dead apps)
+=======
+
+#[test]
+fn reconcile_reaps_windows_of_dead_apps_even_when_minimized() {
+    // Regression: an Electron app (Notion) ordered its window out on close
+    // (leaving is_minimized set), then quit without any termination event
+    // reaching rift. The minimized skip in the orphan scan shielded the window
+    // from the dead-pid check forever, so its tile kept reserving empty screen
+    // space. The dead-process backstop must reap it regardless of that flag.
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+
+    // pid 1 is launchd: alive as a process but never an NSRunningApplication,
+    // which is exactly what the sweep's liveness check keys on.
+    let dead_pid: pid_t = 1;
+    reactor.handle_events(apps.make_app(dead_pid, make_windows(1)));
+    let _events = apps.simulate_events();
+    let wid = WindowId::new(dead_pid, 1);
+    let _ = reactor.layout_manager.layout_engine.handle_event(
+        LayoutEvent::WindowsOnScreenUpdated(space, dead_pid, vec![window_update_tuple(wid)], None),
+    );
+    assert!(reactor.window_manager.windows.contains_key(&wid));
+    assert!(
+        has_windows_in_layout(&mut reactor, space, screen, dead_pid),
+        "window must occupy layout space before the sweep"
+    );
+
+    reactor
+        .window_manager
+        .windows
+        .get_mut(&wid)
+        .expect("window state must exist")
+        .info
+        .is_minimized = true;
+
+    reactor.reconcile_orphan_windows();
+
+    assert!(
+        !reactor.window_manager.windows.contains_key(&wid),
+        "dead app's window state must be removed"
+    );
+    assert!(
+        !has_windows_in_layout(&mut reactor, space, screen, dead_pid),
+        "dead app's window must stop occupying layout space"
+    );
+    assert!(
+        !reactor.app_manager.apps.contains_key(&dead_pid),
+        "dead app's actor entry must be removed"
+    );
+}
+>>>>>>> 5fdc286 (fix: reap minimized windows for dead apps)
