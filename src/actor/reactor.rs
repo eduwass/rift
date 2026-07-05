@@ -695,6 +695,12 @@ impl Reactor {
 ||||||| parent of 65f78a9 (fix: recover app actors from visible windows)
 =======
     fn recover_missing_app_actors_from_visible_windows(&mut self) {
+        // Only recover from the collapsed zero-state; doing this during normal sweeps
+        // churns app actors and briefly relays out with an incomplete window set.
+        if !self.app_manager.apps.is_empty() || !self.window_manager.windows.is_empty() {
+            return;
+        }
+
         let Some(wm_sender) = self.communication_manager.wm_sender.as_ref() else {
             return;
         };
