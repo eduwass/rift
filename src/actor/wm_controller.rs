@@ -238,9 +238,7 @@ impl WmController {
                 );
             }
             DiscoverRunningApps => {
-                for (pid, info) in sys::app::running_apps(None) {
-                    self.new_app(pid, info);
-                }
+                self.discover_running_apps("queued startup discovery");
             }
             AppLaunch(pid, info) => {
                 self.new_app(pid, info);
@@ -328,6 +326,8 @@ impl WmController {
                 if !self.hotkeys_installed {
                     self.register_hotkeys();
                     self.hotkeys_installed = true;
+
+                    self.discover_running_apps("screen-parameter startup fallback");
 
                     let sender = self.sender.clone();
                     let event_tap_tx = self.event_tap_tx.clone();
@@ -479,6 +479,14 @@ impl WmController {
             Command(ReactorCommand(cmd)) => {
                 self.events_tx.send(reactor::Event::Command(cmd));
             }
+        }
+    }
+
+    fn discover_running_apps(&mut self, reason: &'static str) {
+        let apps: Vec<(pid_t, AppInfo)> = sys::app::running_apps(None).collect();
+        tracing::warn!(reason, count = apps.len(), "discovering running apps");
+        for (pid, info) in apps {
+            self.new_app(pid, info);
         }
     }
 
