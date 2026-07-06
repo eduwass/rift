@@ -803,7 +803,20 @@ impl Reactor {
         let mut dead_pids: HashSet<pid_t> = HashSet::default();
         for pid in tracked_pids {
             if NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_none() {
-                dead_pids.insert(pid);
+                // NSRunningApplication can transiently return None for a live pid
+                // (off-main-thread NSWorkspace lookup). Reaping on that alone
+                // destroys the app's windows and relayouts — the survivors expand
+                // to fill the freed space. Only kill(pid, 0) returning ESRCH is
+                // authoritative for "process is gone".
+                match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
+                    Err(nix::errno::Errno::ESRCH) => {
+                        dead_pids.insert(pid);
+                    }
+                    _ => warn!(
+                        pid,
+                        "NSRunningApplication returned None for a live process; skipping reap"
+                    ),
+                }
             }
         }
 
@@ -853,6 +866,11 @@ impl Reactor {
                 .iter_windows()
                 .filter_map(|(wid, _)| (wid.pid == pid).then_some(wid))
                 .collect();
+            warn!(
+                pid,
+                windows = dead_windows.len(),
+                "reaping dead process; removing its windows from the layout"
+            );
             for wid in dead_windows {
                 if let Ok(destroyed) = window_workflow::handle_window_destroyed(
                     &mut self.state,
