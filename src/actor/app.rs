@@ -614,6 +614,7 @@ impl State {
     #[instrument(skip_all, fields(?info))]
     #[must_use]
     fn init(&mut self, handle: AppThreadHandle, info: AppInfo) -> bool {
+<<<<<<< HEAD
         let extended_timeout_prefixes = ["com.jetbrains.", "org.gnu.Emacs"];
         let timeout = Instant::now()
             + match info.bundle_id.as_deref() {
@@ -629,6 +630,17 @@ impl State {
         let mut sleep = || {
             let now = Instant::now();
             let Some(remaining) = timeout.checked_duration_since(now) else {
+||||||| parent of 26e5e60 (fix: log app registration, thread termination, and watch failures)
+        for notif in APP_NOTIFICATIONS {
+            let res = self.observer.add_notification(&self.app, notif);
+            if let Err(err) = res {
+                debug!(pid = ?self.pid, ?err, "Watching app failed");
+=======
+        for notif in APP_NOTIFICATIONS {
+            let res = self.observer.add_notification(&self.app, notif);
+            if let Err(err) = res {
+                warn!(pid = ?self.pid, bundle_id = ?self.bundle_id, ?notif, ?err, "Watching app failed; app will not be managed");
+>>>>>>> 26e5e60 (fix: log app registration, thread termination, and watch failures)
                 return false;
             };
             thread::sleep(Duration::min(sleep_dur, remaining));
