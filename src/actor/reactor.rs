@@ -800,6 +800,15 @@ impl Reactor {
 
         let mut tracked_pids: HashSet<pid_t> = self.app_manager.apps.keys().copied().collect();
         tracked_pids.extend(self.window_manager.windows.keys().map(|wid| wid.pid));
+        for space in self.active_spaces.clone() {
+            tracked_pids.extend(
+                self.layout_manager
+                    .layout_engine
+                    .windows_in_active_workspace(space)
+                    .into_iter()
+                    .map(|wid| wid.pid),
+            );
+        }
         let mut dead_pids: HashSet<pid_t> = HashSet::default();
         for pid in tracked_pids {
             if NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_none() {

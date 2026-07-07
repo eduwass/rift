@@ -5795,4 +5795,62 @@ fn reconcile_reaps_windows_of_dead_apps_even_when_minimized() {
         "dead app's actor entry must be removed"
     );
 }
+<<<<<<< HEAD
 >>>>>>> 5fdc286 (fix: reap minimized windows for dead apps)
+||||||| parent of a2910f1 (fix: prune dead layout-only windows)
+=======
+
+#[test]
+fn reconcile_reaps_layout_only_windows_of_dead_apps() {
+    // Regression: a restored layout can contain a dead pre-restart WindowId that
+    // was never re-adopted into window_manager.windows. The old sweep only
+    // liveness-checked app/window-manager pids, so the ghost tile split the layout
+    // even though query windows showed no real window there.
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+
+    let live = WindowId::new(std::process::id() as pid_t, 1);
+    let ghost = WindowId::new(999_999, 1);
+    let _ = reactor.layout_manager.layout_engine.handle_event(
+        LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            live.pid,
+            vec![window_update_tuple(live)],
+            None,
+        ),
+    );
+    let _ = reactor.layout_manager.layout_engine.handle_event(
+        LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            ghost.pid,
+            vec![window_update_tuple(ghost)],
+            None,
+        ),
+    );
+    assert!(
+        has_windows_in_layout(&mut reactor, space, screen, ghost.pid),
+        "ghost window must occupy layout space before the sweep"
+    );
+    assert!(
+        !reactor.window_manager.windows.contains_key(&ghost),
+        "ghost exists only in the layout tree"
+    );
+
+    reactor.reconcile_orphan_windows();
+
+    assert!(
+        !has_windows_in_layout(&mut reactor, space, screen, ghost.pid),
+        "layout-only dead window must stop occupying layout space"
+    );
+    assert!(
+        has_windows_in_layout(&mut reactor, space, screen, live.pid),
+        "live layout window must be preserved"
+    );
+}
+>>>>>>> a2910f1 (fix: prune dead layout-only windows)
