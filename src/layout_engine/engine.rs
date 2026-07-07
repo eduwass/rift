@@ -810,11 +810,9 @@ impl LayoutEngine {
                     == ScrollingFocusBoundaryBehavior::Stop;
 
         // Fullscreen-follows-focus (config: layout.fullscreen_follows_focus): when the selection
-        // itself is fullscreen, a directional move TRANSFERS the fullscreen to the neighbour
-        // instead of focusing a window hidden behind the fullscreen one. Lift the flag before the
-        // move and re-apply the same variant to whatever is selected afterwards — on a boundary
-        // hit the selection has been restored by then, so the original node re-fullscreens and the
-        // fullscreen stays confined to its workspace (no cross-space hop).
+        // itself is fullscreen, a successful directional move exits fullscreen before focusing the
+        // neighbour. On a boundary hit the selection has been restored by then, so the original node
+        // re-fullscreens and fullscreen stays confined to its workspace (no cross-space hop).
         let (sel_fs, sel_fs_gaps) = if self.layout_settings.fullscreen_follows_focus {
             self.workspace_tree(ws_id).selection_fullscreen_flags(layout)
         } else {
@@ -836,18 +834,6 @@ impl LayoutEngine {
         let mut raise_windows =
             self.filter_active_workspace_windows(window_store, space, raise_windows);
         if focus_window.is_some() {
-            if transfer_fullscreen {
-                let fs_windows = if sel_fs {
-                    self.workspace_tree_mut(ws_id).toggle_fullscreen_of_selection(layout)
-                } else {
-                    self.workspace_tree_mut(ws_id).toggle_fullscreen_within_gaps_of_selection(layout)
-                };
-                for wid in fs_windows {
-                    if !raise_windows.contains(&wid) {
-                        raise_windows.push(wid);
-                    }
-                }
-            }
             let response = EventResponse {
                 focus_window,
                 raise_windows,
@@ -3428,7 +3414,7 @@ mod tests {
         );
     }
 
-    // ---- fullscreen_follows_focus: directional focus transfers the fullscreen flag ----
+    // ---- fullscreen_follows_focus: directional focus exits fullscreen before moving ----
 
     fn fullscreen_test_engine(
         follows: bool,
@@ -3475,6 +3461,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn move_focus_transfers_fullscreen_to_neighbor() {
         let (mut window_store, mut engine, space, window_a, window_b, spaces, centers) =
             fullscreen_test_engine(true);
@@ -3485,6 +3472,15 @@ mod tests {
             &centers,
             LayoutCommand::ToggleFullscreen,
         );
+||||||| parent of 47e9651 (fix: exit fullscreen when moving focus)
+    fn move_focus_transfers_fullscreen_to_neighbor() {
+        let (mut engine, space, window_a, window_b, spaces, centers) = fullscreen_test_engine(true);
+        let _ = engine.handle_command(Some(space), &spaces, &centers, LayoutCommand::ToggleFullscreen);
+=======
+    fn move_focus_exits_fullscreen() {
+        let (mut engine, space, window_a, window_b, spaces, centers) = fullscreen_test_engine(true);
+        let _ = engine.handle_command(Some(space), &spaces, &centers, LayoutCommand::ToggleFullscreen);
+>>>>>>> 47e9651 (fix: exit fullscreen when moving focus)
         assert_eq!(selection_flags(&engine, space), (true, false));
 
         let response = engine.handle_command(
@@ -3497,12 +3493,12 @@ mod tests {
         assert_eq!(response.focus_window, Some(window_b), "focus moves to the neighbor");
         assert_eq!(
             selection_flags(&engine, space),
-            (true, false),
-            "the neighbor inherits the fullscreen flag"
+            (false, false),
+            "moving focus exits fullscreen instead of transferring it"
         );
         assert!(
             response.raise_windows.contains(&window_b),
-            "the newly fullscreened window is raised"
+            "the newly focused window is raised"
         );
 
         let _ = engine.handle_event(
@@ -3592,9 +3588,17 @@ mod tests {
     }
 
     #[test]
+<<<<<<< HEAD
     fn move_focus_transfers_within_gaps_variant() {
         let (mut window_store, mut engine, space, _a, window_b, spaces, centers) =
             fullscreen_test_engine(true);
+||||||| parent of 47e9651 (fix: exit fullscreen when moving focus)
+    fn move_focus_transfers_within_gaps_variant() {
+        let (mut engine, space, _a, window_b, spaces, centers) = fullscreen_test_engine(true);
+=======
+    fn move_focus_exits_within_gaps_fullscreen() {
+        let (mut engine, space, _a, window_b, spaces, centers) = fullscreen_test_engine(true);
+>>>>>>> 47e9651 (fix: exit fullscreen when moving focus)
         let _ = engine.handle_command(
             &mut window_store,
             Some(space),
@@ -3614,8 +3618,8 @@ mod tests {
         assert_eq!(response.focus_window, Some(window_b));
         assert_eq!(
             selection_flags(&engine, space),
-            (false, true),
-            "the within-gaps variant transfers as within-gaps, not plain fullscreen"
+            (false, false),
+            "moving focus exits within-gaps fullscreen instead of transferring it"
         );
     }
 
