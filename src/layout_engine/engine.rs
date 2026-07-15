@@ -3461,8 +3461,7 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-    fn move_focus_transfers_fullscreen_to_neighbor() {
+    fn move_focus_exits_fullscreen() {
         let (mut window_store, mut engine, space, window_a, window_b, spaces, centers) =
             fullscreen_test_engine(true);
         let _ = engine.handle_command(
@@ -3472,15 +3471,6 @@ mod tests {
             &centers,
             LayoutCommand::ToggleFullscreen,
         );
-||||||| parent of 47e9651 (fix: exit fullscreen when moving focus)
-    fn move_focus_transfers_fullscreen_to_neighbor() {
-        let (mut engine, space, window_a, window_b, spaces, centers) = fullscreen_test_engine(true);
-        let _ = engine.handle_command(Some(space), &spaces, &centers, LayoutCommand::ToggleFullscreen);
-=======
-    fn move_focus_exits_fullscreen() {
-        let (mut engine, space, window_a, window_b, spaces, centers) = fullscreen_test_engine(true);
-        let _ = engine.handle_command(Some(space), &spaces, &centers, LayoutCommand::ToggleFullscreen);
->>>>>>> 47e9651 (fix: exit fullscreen when moving focus)
         assert_eq!(selection_flags(&engine, space), (true, false));
 
         let response = engine.handle_command(
@@ -3588,17 +3578,9 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-    fn move_focus_transfers_within_gaps_variant() {
+    fn move_focus_exits_within_gaps_fullscreen() {
         let (mut window_store, mut engine, space, _a, window_b, spaces, centers) =
             fullscreen_test_engine(true);
-||||||| parent of 47e9651 (fix: exit fullscreen when moving focus)
-    fn move_focus_transfers_within_gaps_variant() {
-        let (mut engine, space, _a, window_b, spaces, centers) = fullscreen_test_engine(true);
-=======
-    fn move_focus_exits_within_gaps_fullscreen() {
-        let (mut engine, space, _a, window_b, spaces, centers) = fullscreen_test_engine(true);
->>>>>>> 47e9651 (fix: exit fullscreen when moving focus)
         let _ = engine.handle_command(
             &mut window_store,
             Some(space),

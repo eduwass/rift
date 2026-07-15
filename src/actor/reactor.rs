@@ -665,146 +665,22 @@ impl Reactor {
         self.reconcile_authoritative_active_window_snapshot(active_windows, false);
     }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
     fn orphan_reconcile_outcome(&mut self) -> EventOutcome {
         let mut outcome = EventOutcome::finalized_event(None, false, false, false);
-||||||| parent of 5fdc286 (fix: reap minimized windows for dead apps)
-    /// Re-query an app's visible windows so the stale-window reconciliation in
-    /// `WindowsDiscovered` can reap any window AX/the window server no longer reports.
-    /// Called from the focus/main-window-change paths for a fast reap in the common
-    /// case; the periodic sweep in [`Self::reconcile_orphan_windows`] is the guaranteed
-    /// backstop for apps that emit no event at all on close (e.g. Slack).
-    fn schedule_orphan_reconcile(&mut self, pid: pid_t) {
-        if let Some(app) = self.app_manager.apps.get(&pid) {
-            let _ = app.handle.send(Request::GetVisibleWindows);
-        }
-    }
-
-    /// Reliably reclaim space left by windows that closed without telling rift.
-    ///
-    /// Some apps — notably Electron ones (Slack, ChatGPT, …) — order a window out on
-    /// close instead of destroying it, stay alive, and emit no destroy/focus/main-window
-    /// notification at all, so no event-driven path fires. Run on a timer: any window rift
-    /// still tiles on the active workspace that is no longer on screen is an orphan.
-    /// Re-query just those apps so the existing `WindowsDiscovered` reconciliation reaps
-    /// them. Scoped to the active workspace so windows parked on inactive workspaces
-    /// (legitimately off screen) never trigger work.
-    fn reconcile_orphan_windows(&mut self) {
-=======
-||||||| parent of 65f78a9 (fix: recover app actors from visible windows)
-=======
-    fn recover_missing_app_actors_from_visible_windows(&mut self) {
-        // Only recover from the collapsed zero-state; doing this during normal sweeps
-        // churns app actors and briefly relays out with an incomplete window set.
-        if !self.app_manager.apps.is_empty() || !self.window_manager.windows.is_empty() {
-            return;
-        }
-
-        let Some(wm_sender) = self.communication_manager.wm_sender.as_ref() else {
-            return;
-        };
-
-        let mut missing_pids: HashSet<pid_t> = HashSet::default();
-        for info in self.authoritative_window_snapshot_for_active_spaces() {
-            if info.layer != 0 || self.app_manager.apps.contains_key(&info.pid) {
-                continue;
-            }
-            missing_pids.insert(info.pid);
-        }
-
-        for pid in missing_pids {
-            let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
-                continue;
-            };
-            warn!(pid, "recovering missing app actor from visible WindowServer window");
-            wm_sender.send(crate::actor::wm_controller::WmEvent::AppLaunch(
-                pid,
-                AppInfo::from(&*app),
-            ));
-        }
-    }
-
->>>>>>> 65f78a9 (fix: recover app actors from visible windows)
-||||||| parent of 69998f2 (fix: stop automatic app recovery relayout)
-    fn recover_missing_app_actors_from_visible_windows(&mut self) {
-        // Only recover from the collapsed zero-state; doing this during normal sweeps
-        // churns app actors and briefly relays out with an incomplete window set.
-        if !self.app_manager.apps.is_empty() || !self.window_manager.windows.is_empty() {
-            return;
-        }
-
-        let Some(wm_sender) = self.communication_manager.wm_sender.as_ref() else {
-            return;
-        };
-
-        let mut missing_pids: HashSet<pid_t> = HashSet::default();
-        for info in self.authoritative_window_snapshot_for_active_spaces() {
-            if info.layer != 0 || self.app_manager.apps.contains_key(&info.pid) {
-                continue;
-            }
-            missing_pids.insert(info.pid);
-        }
-
-        for pid in missing_pids {
-            let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
-                continue;
-            };
-            warn!(pid, "recovering missing app actor from visible WindowServer window");
-            wm_sender.send(crate::actor::wm_controller::WmEvent::AppLaunch(
-                pid,
-                AppInfo::from(&*app),
-            ));
-        }
-    }
-
-=======
->>>>>>> 69998f2 (fix: stop automatic app recovery relayout)
-    /// Re-query an app's visible windows so the stale-window reconciliation in
-    /// `WindowsDiscovered` can reap any window AX/the window server no longer reports.
-    /// Called from the focus/main-window-change paths for a fast reap in the common
-    /// case; the periodic sweep in [`Self::reconcile_orphan_windows`] is the guaranteed
-    /// backstop for apps that emit no event at all on close (e.g. Slack).
-    fn schedule_orphan_reconcile(&mut self, pid: pid_t) {
-        if let Some(app) = self.app_manager.apps.get(&pid) {
-            let _ = app.handle.send(Request::GetVisibleWindows);
-        }
-    }
-
-    /// Reliably reclaim space left by windows that closed without telling rift.
-    ///
-    /// Some apps — notably Electron ones (Slack, ChatGPT, …) — order a window out on
-    /// close instead of destroying it, stay alive, and emit no destroy/focus/main-window
-    /// notification at all, so no event-driven path fires. Run on a timer: any window rift
-    /// still tiles on the active workspace that is no longer on screen is an orphan.
-    /// Re-query just those apps so the existing `WindowsDiscovered` reconciliation reaps
-    /// them. Scoped to the active workspace so windows parked on inactive workspaces
-    /// (legitimately off screen) never trigger work.
-    ///
-    /// Dead-process backstop: every pid rift still tracks (app actor or window state)
-    /// is liveness-checked, deliberately ignoring the workspace/minimized/on-screen
-    /// scoping above — a window of a dead process is garbage wherever it is parked.
-    /// Without this, an Electron app that orders its window out on close (marking it
-    /// minimized) and quits later without any notification leaves a ghost node tiling
-    /// empty screen space forever. Restored-but-unadopted windows are unaffected:
-    /// restore populates only the layout trees, never these maps.
-    fn reconcile_orphan_windows(&mut self) {
->>>>>>> 5fdc286 (fix: reap minimized windows for dead apps)
         if self.is_mission_control_active() || self.is_in_drag() {
             return outcome;
         }
-        if self.app_manager.apps.is_empty() && self.window_manager.windows.is_empty() {
+        if self.app_manager.apps.is_empty() && self.state.windows.tracked_window_count() == 0 {
             warn!("rift app/window state collapsed; skipping automatic recovery to avoid visible relayout flash");
         }
 
         let mut tracked_pids: HashSet<pid_t> = self.app_manager.apps.keys().copied().collect();
-        tracked_pids.extend(self.window_manager.windows.keys().map(|wid| wid.pid));
-        for space in self.active_spaces.clone() {
+        tracked_pids.extend(self.state.windows.iter_windows().map(|(wid, _)| wid.pid));
+        for space in self.iter_active_spaces() {
             tracked_pids.extend(
                 self.layout_manager
                     .layout_engine
-                    .windows_in_active_workspace(space)
+                    .windows_in_active_workspace(&self.state.windows, space)
                     .into_iter()
                     .map(|wid| wid.pid),
             );
@@ -832,25 +708,15 @@ impl Reactor {
         let on_screen: HashSet<WindowServerId> =
             window_server::get_visible_windows_with_layer(None).into_iter().map(|i| i.id).collect();
         let mut pids: HashSet<pid_t> = HashSet::default();
-<<<<<<< HEAD
-        let mut dead_pids: HashSet<pid_t> = HashSet::default();
         for space in self.iter_active_spaces() {
             for wid in self
                 .layout_manager
                 .layout_engine
                 .windows_in_active_workspace(&self.state.windows, space)
             {
-||||||| parent of 5fdc286 (fix: reap minimized windows for dead apps)
-        let mut dead_pids: HashSet<pid_t> = HashSet::default();
-        for space in self.active_spaces.clone() {
-            for wid in self.layout_manager.layout_engine.windows_in_active_workspace(space) {
-=======
-        for space in self.active_spaces.clone() {
-            for wid in self.layout_manager.layout_engine.windows_in_active_workspace(space) {
                 if dead_pids.contains(&wid.pid) {
                     continue;
                 }
->>>>>>> 5fdc286 (fix: reap minimized windows for dead apps)
                 if self.layout_manager.layout_engine.is_window_floating(wid) {
                     continue;
                 }
@@ -902,6 +768,22 @@ impl Reactor {
             }
         }
         outcome
+    }
+
+    /// Re-query an app's visible windows so the stale-window reconciliation in
+    /// `WindowsDiscovered` can reap any window AX/the window server no longer reports.
+    /// Called from the focus/main-window-change paths for a fast reap in the common
+    /// case; the periodic sweep in [`Self::reconcile_orphan_windows`] is the guaranteed
+    /// backstop for apps that emit no event at all on close (e.g. Slack).
+    fn schedule_orphan_reconcile(&mut self, pid: pid_t) {
+        if let Some(app) = self.app_manager.apps.get(&pid) {
+            let _ = app.handle.send(Request::GetVisibleWindows);
+        }
+    }
+
+    /// Periodic orphan sweep used by tests and the reconcile timer event.
+    fn reconcile_orphan_windows(&mut self) {
+        self.apply_event_outcome(self.orphan_reconcile_outcome());
     }
 
     /// Rebuild only the on-screen window-server id set from live state, without touching

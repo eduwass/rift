@@ -745,7 +745,7 @@ impl Reactor {
     /// prune time without a live enumeration. Ceiling: reboot + inactive workspace
     /// still prunes; upgrade by fuzzy-matching the app's full window list here.
     fn adopt_surviving_window(&mut self, server_id: WindowServerId, old_wid: WindowId) -> bool {
-        let Some(&live_wid) = self.window_manager.window_ids.get(&server_id) else {
+        let Some(live_wid) = self.state.windows.tracked_window_id(server_id) else {
             return false;
         };
         let Some(space) = self

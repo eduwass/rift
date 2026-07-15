@@ -5063,7 +5063,6 @@ fn display_churn_end_refresh_is_idempotent_without_topology_change() {
         "idempotent churn-end refresh should not trigger follow-up frame writes when nothing moved"
     );
 }
-<<<<<<< HEAD
 
 #[test]
 fn display_churn_end_refresh_preserves_non_default_workspace_without_app_rules() {
@@ -5737,8 +5736,6 @@ fn native_space_resolution_policy_table() {
         assert_eq!(resolved, expected, "resolver case: {case}");
     }
 }
-||||||| parent of 5fdc286 (fix: reap minimized windows for dead apps)
-=======
 
 #[test]
 fn reconcile_reaps_windows_of_dead_apps_even_when_minimized() {
@@ -5766,16 +5763,16 @@ fn reconcile_reaps_windows_of_dead_apps_even_when_minimized() {
     let _ = reactor.layout_manager.layout_engine.handle_event(
         LayoutEvent::WindowsOnScreenUpdated(space, dead_pid, vec![window_update_tuple(wid)], None),
     );
-    assert!(reactor.window_manager.windows.contains_key(&wid));
+    assert!(reactor.state.windows.window(wid).is_some());
     assert!(
         has_windows_in_layout(&mut reactor, space, screen, dead_pid),
         "window must occupy layout space before the sweep"
     );
 
     reactor
-        .window_manager
+        .state
         .windows
-        .get_mut(&wid)
+        .window_mut(wid)
         .expect("window state must exist")
         .info
         .is_minimized = true;
@@ -5783,7 +5780,7 @@ fn reconcile_reaps_windows_of_dead_apps_even_when_minimized() {
     reactor.reconcile_orphan_windows();
 
     assert!(
-        !reactor.window_manager.windows.contains_key(&wid),
+        reactor.state.windows.window(wid).is_none(),
         "dead app's window state must be removed"
     );
     assert!(
@@ -5795,17 +5792,13 @@ fn reconcile_reaps_windows_of_dead_apps_even_when_minimized() {
         "dead app's actor entry must be removed"
     );
 }
-<<<<<<< HEAD
->>>>>>> 5fdc286 (fix: reap minimized windows for dead apps)
-||||||| parent of a2910f1 (fix: prune dead layout-only windows)
-=======
 
 #[test]
 fn reconcile_reaps_layout_only_windows_of_dead_apps() {
     // Regression: a restored layout can contain a dead pre-restart WindowId that
-    // was never re-adopted into window_manager.windows. The old sweep only
-    // liveness-checked app/window-manager pids, so the ghost tile split the layout
-    // even though query windows showed no real window there.
+    // was never re-adopted into window state. The old sweep only liveness-checked
+    // app/window-store pids, so the ghost tile split the layout even though query
+    // windows showed no real window there.
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
@@ -5838,7 +5831,7 @@ fn reconcile_reaps_layout_only_windows_of_dead_apps() {
         "ghost window must occupy layout space before the sweep"
     );
     assert!(
-        !reactor.window_manager.windows.contains_key(&ghost),
+        reactor.state.windows.window(ghost).is_none(),
         "ghost exists only in the layout tree"
     );
 
@@ -5853,4 +5846,3 @@ fn reconcile_reaps_layout_only_windows_of_dead_apps() {
         "live layout window must be preserved"
     );
 }
->>>>>>> a2910f1 (fix: prune dead layout-only windows)
