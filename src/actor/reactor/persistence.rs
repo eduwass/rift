@@ -891,7 +891,6 @@ mod tests {
     /// never offered to `try_adopt_window`, mirroring how discovery skips it.
     fn register_hidden_live(reactor: &mut Reactor, wid: WindowId, server: u32) {
         register_live(reactor, wid, server);
-        reactor.window_manager.window_ids.insert(WindowServerId::new(server), wid);
     }
 
     /// A single test screen whose synthesized display uuid is `test-display-0`.
