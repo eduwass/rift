@@ -4194,7 +4194,6 @@ mod tests {
             before
         );
     }
-    }
 
     #[test]
     fn workspace_switch_only_commits_focus_after_authoritative_commit() {
