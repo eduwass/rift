@@ -152,26 +152,6 @@ impl VirtualWorkspace {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HideCorner {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    #[default]
-    BottomRight,
-}
-
-impl HideCorner {
-    pub fn opposite(self) -> Self {
-        match self {
-            HideCorner::TopLeft => HideCorner::TopRight,
-            HideCorner::TopRight => HideCorner::TopLeft,
-            HideCorner::BottomLeft => HideCorner::BottomRight,
-            HideCorner::BottomRight => HideCorner::BottomLeft,
-        }
-    }
-}
-
 /// Owns the virtual workspace topology for each native macOS space.
 ///
 /// Membership is single-source-of-truth in `WindowStore`. Any code that

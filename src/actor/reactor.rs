@@ -83,7 +83,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 use transaction_manager::TransactionId;
 
 use super::{event_tap, gesture_tap};
@@ -783,7 +783,8 @@ impl Reactor {
 
     /// Periodic orphan sweep used by tests and the reconcile timer event.
     fn reconcile_orphan_windows(&mut self) {
-        self.apply_event_outcome(self.orphan_reconcile_outcome());
+        let outcome = self.orphan_reconcile_outcome();
+        self.apply_event_outcome(outcome);
     }
 
     /// Rebuild only the on-screen window-server id set from live state, without touching
@@ -1715,7 +1716,7 @@ impl Reactor {
                 {
                     self.save_cursor_for_cursor_workspace();
                 }
-                return;
+                return Ok(EventOutcome::default());
             }
             Event::MissionControlNativeEntered => {
                 let outcome = topology_workflow::handle_mission_control_native_entered(
@@ -2061,7 +2062,7 @@ impl Reactor {
     /// writes, then UI/platform presentation state is refreshed. Broadcast and
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
-    fn apply_event_outcome(&mut self, outcome: EventOutcome) {
+    fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
         if !outcome.window_server_updates.is_empty() {
             self.update_partial_window_server_info(outcome.window_server_updates);
         }
@@ -3692,6 +3693,23 @@ impl Reactor {
         }
 
         self.raise_topmost_windows(order_only);
+    }
+
+    fn raise_window(&mut self, wid: WindowId, quiet: Quiet, warp: Option<CGPoint>) {
+        let mut app_handles = HashMap::default();
+        if let Some(app) = self.app_manager.apps.get(&wid.pid) {
+            app_handles.insert(wid.pid, app.handle.clone());
+        }
+        let msg = raise_manager::Event::RaiseRequest(RaiseRequest {
+            raise_windows: vec![vec![wid]],
+            focus_window: Some((wid, warp)),
+            app_handles,
+            focus_quiet: quiet,
+            kind: RaiseKind::Focus,
+        });
+        if let Err(e) = self.communication_manager.raise_manager_tx.try_send(msg) {
+            warn!("Failed to send raise request to raise manager: {}", e);
+        }
     }
 
     fn raise_topmost_windows(&mut self, windows: Vec<WindowId>) {

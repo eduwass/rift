@@ -14,8 +14,9 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGBitmapInfo, CGColorSpace, CGContext, CGError, CGImage, CGInterpolationQuality, CGWindowID,
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowLayer, kCGWindowName,
-    kCGWindowOwnerName,
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowAlpha,
+    kCGWindowBounds, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
+    kCGWindowOwnerPID,
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -275,6 +276,31 @@ pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
     }
 }
 
+/// Global on-screen CG window snapshot, optionally filtered by layer.
+///
+/// Prefer space-actor membership for ordinary reactor reconciliation. This remains
+/// useful for orphan reclaim / debug queries that need the raw CG on-screen set.
+pub fn get_visible_windows_with_layer(layer: Option<i32>) -> Vec<WindowServerInfo> {
+    get_visible_windows_raw::<CFDictionary<CFString, CFType>>()
+        .iter()
+        .filter_map(|win| make_info(&win, layer))
+        .collect()
+}
+
+pub fn associated_windows(id: WindowServerId) -> Vec<WindowServerId> {
+    let assoc = unsafe { SLSCopyAssociatedWindows(*G_CONNECTION, id.as_u32()) };
+    let Some(assoc) = NonNull::new(assoc) else {
+        return Vec::new();
+    };
+
+    let assoc_cf: CFRetained<CFArray<CFNumber>> = unsafe { CFRetained::from_raw(assoc) };
+    assoc_cf
+        .iter()
+        .filter_map(|num| num.as_i64())
+        .map(|wid| WindowServerId::new(wid as u32))
+        .collect()
+}
+
 pub fn window_is_sticky(id: WindowServerId) -> bool {
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
@@ -364,6 +390,42 @@ fn get_visible_windows_raw<T: Type>() -> CFRetained<CFArray<T>> {
     )
 }
 
+fn make_info(
+    win: &CFDictionary<CFString, CFType>,
+    layer_filter: Option<i32>,
+) -> Option<WindowServerInfo> {
+    let layer = get_num(win, unsafe { kCGWindowLayer })?.try_into().ok()?;
+    if layer_filter.is_some() && layer_filter != Some(layer) {
+        return None;
+    }
+    if window_dict_is_effectively_invisible(win, layer) {
+        return None;
+    }
+
+    let id = get_num(win, unsafe { kCGWindowNumber })?;
+    let pid = get_num(win, unsafe { kCGWindowOwnerPID })?;
+    if let Ok(dict) = win.get(unsafe { kCGWindowBounds })?.downcast::<CFDictionary>() {
+        let mut cg_frame = CGRect::default();
+        unsafe {
+            CGRectMakeWithDictionaryRepresentation(
+                CFRetained::<CFDictionary<_, _>>::as_ptr(&dict).as_ptr(),
+                &mut cg_frame,
+            )
+        };
+
+        return Some(WindowServerInfo {
+            id: WindowServerId(id.try_into().ok()?),
+            pid: pid.try_into().ok()?,
+            layer,
+            frame: cg_frame,
+            min_frame: CGSize::ZERO,
+            max_frame: CGSize::ZERO,
+        });
+    }
+
+    None
+}
+
 #[cfg(test)]
 pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     ids.iter()
@@ -421,8 +483,18 @@ fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Opt
     dict.get(key)?.downcast::<CFNumber>().ok()?.as_i64()
 }
 
+fn get_f64(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<f64> {
+    dict.get(key)?.downcast::<CFNumber>().ok()?.as_f64()
+}
+
 fn get_string(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<String> {
     Some(dict.get(key)?.downcast::<CFString>().ok()?.to_string())
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn window_dict_is_effectively_invisible(win: &CFDictionary<CFString, CFType>, layer: i32) -> bool {
+    get_f64(win, unsafe { kCGWindowAlpha })
+        .is_some_and(|alpha| window_is_effectively_invisible(alpha as f32, layer))
 }
 
 #[cfg_attr(test, allow(dead_code))]

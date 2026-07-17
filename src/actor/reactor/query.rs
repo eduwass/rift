@@ -595,7 +595,7 @@ impl Reactor {
             .topmost_windows
             .keys()
             .filter_map(|wid| {
-                let window = self.state.windows.window(wid)?;
+                let window = self.state.windows.window(*wid)?;
                 let wsid = window.info.sys_id?;
                 let frame = crate::sys::window_server::get_window(wsid)
                     .map(|info| info.frame)

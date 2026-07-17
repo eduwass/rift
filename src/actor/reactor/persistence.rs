@@ -575,11 +575,19 @@ impl Reactor {
 
         for (i, (saved_space, _)) in pairs.iter().enumerate() {
             let scratch = SpaceId::new(scratch_base + 1 + i as u64);
-            self.layout_manager.layout_engine.remap_space(*saved_space, scratch);
+            self.layout_manager.layout_engine.remap_space(
+                &mut self.state.windows,
+                *saved_space,
+                scratch,
+            );
         }
         for (i, (_, live_space)) in pairs.iter().enumerate() {
             let scratch = SpaceId::new(scratch_base + 1 + i as u64);
-            self.layout_manager.layout_engine.remap_space(scratch, *live_space);
+            self.layout_manager.layout_engine.remap_space(
+                &mut self.state.windows,
+                scratch,
+                *live_space,
+            );
         }
     }
 
@@ -752,7 +760,7 @@ impl Reactor {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .space_for_window_any(old_wid)
+            .space_for_window_any(&self.state.windows, old_wid)
         else {
             return false;
         };
