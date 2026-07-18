@@ -4043,6 +4043,17 @@ impl Reactor {
             let Some(above_state) = self.state.windows.window(above_wid) else {
                 continue;
             };
+            // Parked windows from inactive workspaces sit ~2px inside the display edge; with
+            // edge-to-edge gaps they overlap the edge column's frame by a tall sliver that
+            // clears the area threshold, wrongly marking it occluded and killing FFM on it.
+            // A window the user cannot see never really occludes — skip them.
+            if !self.layout_manager.layout_engine.is_window_in_active_workspace(
+                &self.state.windows,
+                space,
+                above_wid,
+            ) {
+                continue;
+            }
             let above_frame = above_state.frame_monotonic;
             if candidate_frame.intersection(&above_frame).area() <= 64.0 {
                 continue;
