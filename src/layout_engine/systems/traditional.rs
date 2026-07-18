@@ -2095,12 +2095,23 @@ impl TraditionalLayoutSystem {
             if p1 == p2 {
                 let size1 = self.tree.data.layout.info[node1].size.max(0.0);
                 let size2 = self.tree.data.layout.info[node2].size.max(0.0);
-                let new_container = self.tree.mk_node().insert_before(node1);
-                node1.detach(&mut self.tree).push_back(new_container).with(|child, tree| {
-                    tree.data.layout.info[child].size = size1;
+                // Insert in sibling (spatial) order, not selection-first: the pair's child
+                // order becomes left/right (or top/bottom after an orientation toggle), so
+                // grouping [selection, target] unconditionally put the selection first even
+                // when the target was spatially before it.
+                let node2_first = p1
+                    .children(self.map())
+                    .take_while(|&child| child != node1)
+                    .any(|child| child == node2);
+                let (first, second) = if node2_first { (node2, node1) } else { (node1, node2) };
+                let new_container = self.tree.mk_node().insert_before(first);
+                let first_size = self.tree.data.layout.info[first].size.max(0.0);
+                let second_size = self.tree.data.layout.info[second].size.max(0.0);
+                first.detach(&mut self.tree).push_back(new_container).with(|child, tree| {
+                    tree.data.layout.info[child].size = first_size;
                 });
-                node2.detach(&mut self.tree).push_back(new_container).with(|child, tree| {
-                    tree.data.layout.info[child].size = size2;
+                second.detach(&mut self.tree).push_back(new_container).with(|child, tree| {
+                    tree.data.layout.info[child].size = second_size;
                 });
                 self.tree.data.layout.info[new_container].size = size1 + size2;
                 self.tree.data.layout.info[new_container].total = size1 + size2;
