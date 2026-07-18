@@ -1066,10 +1066,32 @@ impl LayoutSystem for TraditionalLayoutSystem {
         let selection = self.selection(layout);
         if let Some(_focused_window) = self.window_at(selection) {
             // In a vertical stack the stack axis (height) is reachable from every window, but
-            // the column width is not reachable at all. Dedicate the LAST (bottom) window to
-            // the perpendicular axis so a stack exposes both: bottom window resizes the column
-            // width, the others resize heights. Falls through to the remaining directions when
-            // the preferred axis has no room (e.g. single-column workspace).
+            // the column width is not reachable at all. Dedicate the BOTTOM window of the whole
+            // visual stack to the perpendicular axis so a stack exposes both: bottom window
+            // resizes the column width, all others resize heights. Stacks are often nested
+            // pairs (V[V[A,B],C]), so "bottom" means last child at every vertical level — a
+            // nested pair's last child is a visual middle window and must keep resizing
+            // vertically. Falls through to the remaining directions when the preferred axis
+            // has no room (e.g. single-column workspace).
+            let stack_bottom = {
+                let mut node = selection;
+                let mut levels = 0usize;
+                let mut bottom = true;
+                while let Some(parent) = node.parent(self.map()) {
+                    if self.layout(parent).orientation() != Orientation::Vertical {
+                        break;
+                    }
+                    if node.next_sibling(self.map()).is_some() {
+                        bottom = false;
+                        break;
+                    }
+                    if node.prev_sibling(self.map()).is_some() {
+                        levels += 1;
+                    }
+                    node = parent;
+                }
+                bottom && levels > 0
+            };
             let directions = selection
                 .parent(self.map())
                 .map(|parent| match self.layout(parent).orientation() {
@@ -1079,10 +1101,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
                         Direction::Down,
                         Direction::Up,
                     ],
-                    Orientation::Vertical
-                        if selection.next_sibling(self.map()).is_none()
-                            && selection.prev_sibling(self.map()).is_some() =>
-                    {
+                    Orientation::Vertical if stack_bottom => {
                         [Direction::Right, Direction::Left, Direction::Down, Direction::Up]
                     }
                     Orientation::Vertical => [
