@@ -249,6 +249,8 @@ enum LayoutCommands {
     CenterSelection,
     /// Rebalance the active layout tree.
     Rebalance,
+    /// Rebalance with the focused window at RATIO (0-1) of the width, others equal
+    RebalanceFocus { ratio: f64 },
 }
 
 #[derive(Subcommand)]
@@ -745,6 +747,9 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         LayoutCommands::Rebalance => {
             Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::Rebalance)))
         }
+        LayoutCommands::RebalanceFocus { ratio } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::RebalanceFocus { ratio }),
+        )),
     }
 }
 

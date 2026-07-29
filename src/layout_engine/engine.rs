@@ -63,6 +63,10 @@ pub enum LayoutCommand {
         amount: f64,
     },
     Rebalance,
+    /// Rebalance with the selected window at `ratio` of the axis, others equal.
+    RebalanceFocus {
+        ratio: f64,
+    },
 
     /// Scroll the strip by a normalized delta (scaled by column step width)
     ScrollStrip {
@@ -2007,6 +2011,15 @@ impl LayoutEngine {
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 self.workspace_tree_mut(workspace_id).balance_sizes(layout);
+                EventResponse::default()
+            }
+            LayoutCommand::RebalanceFocus { ratio } => {
+                if is_floating {
+                    return EventResponse::default();
+                }
+
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                self.workspace_tree_mut(workspace_id).balance_sizes_weighted(layout, ratio);
                 EventResponse::default()
             }
             LayoutCommand::AdjustMasterRatio(delta) => {

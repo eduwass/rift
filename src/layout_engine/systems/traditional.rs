@@ -1157,6 +1157,26 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.rebalance(layout);
     }
 
+    fn balance_sizes_weighted(&mut self, layout: LayoutId, ratio: f64) {
+        let n = self.visible_windows_in_layout(layout).len();
+        if n < 2 {
+            return;
+        }
+        // Capture the selection before balance_sizes rebuilds the tree (it
+        // re-selects the first child), then weight the focused column so it
+        // lands at `ratio` while the equal-weighted others share the rest.
+        let focused = self.selected_window(layout);
+        self.balance_sizes(layout);
+        let Some(focused) = focused else { return };
+        let Some(node) = self.node_for(layout, focused) else { return };
+        let ratio = ratio.clamp(0.2, 0.9);
+        let weight = (ratio * (n as f64 - 1.0) / (1.0 - ratio)) as f32;
+        self.tree.data.layout.info[node].size = weight;
+        let root = self.root(layout);
+        self.tree.data.layout.info[root].total = weight + (n as f32 - 1.0);
+        self.select(node);
+    }
+
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
         let node_a = match self.tree.data.window.node_for(layout, a) {
             Some(n) => n,
