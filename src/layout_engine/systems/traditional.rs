@@ -1142,6 +1142,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
             return;
         }
 
+        let selected = self.selected_window(layout);
         for wid in &windows {
             self.remove_window(*wid);
         }
@@ -1151,8 +1152,15 @@ impl LayoutSystem for TraditionalLayoutSystem {
         for wid in windows {
             self.add_window_under(layout, root, wid);
         }
-        if let Some(first_child) = root.first_child(self.map()) {
-            self.select(first_child);
+        // Keep the previously selected window selected across the rebuild
+        // (falling back to the first child) so a follow-up selection-relative
+        // command — e.g. cycling rebalance → rebalance-focus — targets the
+        // window the user is actually on, not the leftmost one.
+        let reselect = selected
+            .and_then(|wid| self.tree.data.window.node_for(layout, wid))
+            .or_else(|| root.first_child(self.map()));
+        if let Some(node) = reselect {
+            self.select(node);
         }
         self.rebalance(layout);
     }
