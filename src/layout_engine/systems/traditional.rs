@@ -1168,7 +1168,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         let focused = self.selected_window(layout);
         self.balance_sizes(layout);
         let Some(focused) = focused else { return };
-        let Some(node) = self.node_for(layout, focused) else { return };
+        let Some(node) = self.tree.data.window.node_for(layout, focused) else { return };
         let ratio = ratio.clamp(0.2, 0.9);
         let weight = (ratio * (n as f64 - 1.0) / (1.0 - ratio)) as f32;
         self.tree.data.layout.info[node].size = weight;
