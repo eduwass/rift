@@ -238,6 +238,16 @@ pub(crate) fn identify_stale_windows(
             let info = match observation.info.as_ref() {
                 Some(info) => info,
                 None => {
+                    // No Skylight record for this id, and the window is already
+                    // absent from AX (`known_visible`). Unless the server still
+                    // claims it's ordered in (alpha-0 hides), the window died
+                    // without a destroy notification (e.g. ssh-backed terminals
+                    // closing during display churn). Skipping here leaked
+                    // permanent ghost tiles that reserved empty columns.
+                    let visible_in_snapshot = state.windows.is_window_visible(ws_id);
+                    if !observation.ordered_in && !visible_in_snapshot {
+                        return Some(wid);
+                    }
                     trace!(
                         ?wid,
                         ws_id = ?ws_id,
