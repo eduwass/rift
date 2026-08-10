@@ -681,7 +681,9 @@ impl Reactor {
         // live id via the same path the toggle uses.
         let was_topmost = self.persistence.pending_topmost.remove(&old_wid);
         if old_wid != wid {
-            self.layout_manager.layout_engine.rewrite_window_id(old_wid, wid);
+            self.layout_manager
+                .layout_engine
+                .rewrite_window_id(&mut self.state.windows, old_wid, wid);
         }
         if was_topmost {
             self.pin_topmost_window(wid);

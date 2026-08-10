@@ -1352,10 +1352,20 @@ impl LayoutEngine {
     /// from a snapshot using the pre-restart (now-dead) `WindowId`s, and as each
     /// live window is rediscovered its snapshot identity is rewritten onto the
     /// fresh runtime id so the tree it was placed in is inherited exactly.
-    pub fn rewrite_window_id(&mut self, old: WindowId, new: WindowId) {
+    ///
+    /// Workspace membership lives in `WindowStore` (not the engine), so the
+    /// store must be rewritten in the same call — otherwise adoption leaves the
+    /// old id mapped and the new id unassigned.
+    pub fn rewrite_window_id(
+        &mut self,
+        window_store: &mut WindowStore,
+        old: WindowId,
+        new: WindowId,
+    ) {
         if old == new {
             return;
         }
+        window_store.transfer_persistent_window_metadata(old, new);
         self.virtual_workspace_manager.rewrite_window_id(old, new);
         self.floating.rewrite_window_id(old, new);
         if self.focused_window == Some(old) {
@@ -4538,7 +4548,7 @@ mod tests {
 
         // A fresh runtime id (as a rediscovered window would carry after restart).
         let new = WindowId::new(77, 5);
-        engine.rewrite_window_id(old, new);
+        engine.rewrite_window_id(&mut window_store, old, new);
 
         let layout_after = engine.calculate_layout(
             space,
@@ -4594,7 +4604,7 @@ mod tests {
         assert!(engine.is_window_floating(old));
 
         let new = WindowId::new(77, 5);
-        engine.rewrite_window_id(old, new);
+        engine.rewrite_window_id(&mut window_store, old, new);
 
         assert!(!engine.is_window_floating(old), "old id no longer floating");
         assert!(engine.is_window_floating(new), "floating state moves to the new id");
@@ -4617,7 +4627,7 @@ mod tests {
         );
 
         // Identical ids: nothing changes.
-        engine.rewrite_window_id(w1, w1);
+        engine.rewrite_window_id(&mut window_store, w1, w1);
         assert!(
             engine
                 .virtual_workspace_manager()
@@ -4628,7 +4638,7 @@ mod tests {
         // Absent id: the present window is untouched and no phantom appears.
         let absent = WindowId::new(999, 9);
         let ghost = WindowId::new(888, 8);
-        engine.rewrite_window_id(absent, ghost);
+        engine.rewrite_window_id(&mut window_store, absent, ghost);
         assert!(
             engine
                 .virtual_workspace_manager()
