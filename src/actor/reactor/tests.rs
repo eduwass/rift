@@ -2590,7 +2590,7 @@ fn mission_control_exit_refresh_drops_windows_missing_from_origin_space_snapshot
     assert!(has_window_in_layout(&mut reactor, space, screen, moved));
     assert!(has_window_in_layout(&mut reactor, space, screen, retained));
 
-    apps.windows.remove(&moved);
+    apps.remove_window(moved);
     let retained_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 2);
     reactor.refresh_windows_after_mission_control_with_active_windows(vec![(
         retained_wsid,
@@ -2630,6 +2630,9 @@ fn mission_control_refresh_known_visible_fallback_does_not_restore_window_moved_
         &LayoutCommand::CreateWorkspace,
     );
 
+    // The window really did leave this space, so it is gone from the app's list and
+    // from the window server's on-screen set — not just absent from the snapshot below.
+    apps.remove_window(moved);
     reactor.refresh_windows_after_mission_control_with_active_windows(vec![(
         retained_wsid,
         Some(space),
@@ -5754,9 +5757,16 @@ fn reconcile_reaps_windows_of_dead_apps_even_when_minimized() {
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
 
-    // pid 1 is launchd: alive as a process but never an NSRunningApplication,
-    // which is exactly what the sweep's liveness check keys on.
-    let dead_pid: pid_t = 1;
+    // A pid that is genuinely gone. This deliberately does NOT use a live-but-not-an-
+    // NSRunningApplication pid (launchd, say): `fix: verify process death with kill(0)
+    // before reaping app windows` made ESRCH the only authoritative signal, because a
+    // transient NSRunningApplication lookup failure would otherwise destroy a live
+    // app's windows. What this test guards is the other half — that `is_minimized`
+    // does not shield a window once its process really is dead.
+    // Above macOS's pid_max (99999) so it can never be a live process, and small
+    // enough that the harness's `pid * 10_000` synthetic window-server id still fits
+    // in a u32.
+    let dead_pid: pid_t = 400_000;
     reactor.handle_events(apps.make_app(dead_pid, make_windows(1)));
     let _events = apps.simulate_events();
     let wid = WindowId::new(dead_pid, 1);

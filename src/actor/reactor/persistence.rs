@@ -1801,14 +1801,13 @@ mod tests {
         reactor.space_state.screens = one;
         reactor.layout_manager.layout_engine = fresh_engine();
         reactor.load_arrangement_after_switch();
+        // Ask the ENGINE, not the store: this test simulates the unplug by swapping in a
+        // fresh engine, and workspace membership now lives in WindowStore, which that
+        // swap deliberately does not touch. Querying the store here would report the
+        // window as still assigned no matter what the engine did.
         assert!(
-            reactor
-                .layout_manager
-                .layout_engine
-                .virtual_workspace_manager()
-                .workspace_for_window_any(&reactor.state.windows, wa)
-                .is_none(),
-            "two-display state is gone while the display is unplugged"
+            !reactor.layout_manager.layout_engine.all_window_ids().contains(&wa),
+            "two-display state is gone from the engine while the display is unplugged"
         );
 
         // Replug: the saved two-display arrangement is lifted back into the engine.

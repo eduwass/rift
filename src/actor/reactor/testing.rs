@@ -198,6 +198,28 @@ impl Apps {
         }
     }
 
+    /// Simulate a window leaving this space/display (a Mission Control move, a drag to
+    /// another display). Both halves matter: the app stops reporting it AND the window
+    /// server stops listing it on screen. Dropping only the first lets the reactor's
+    /// force-refresh rediscover the window and rebuild the tile the test just watched
+    /// it leave.
+    pub fn remove_window(&mut self, wid: WindowId) {
+        self.windows.remove(&wid);
+        let remaining: Vec<WindowServerInfo> = self
+            .windows
+            .iter()
+            .map(|(id, state)| WindowServerInfo {
+                pid: id.pid,
+                id: WindowServerId::new((id.pid as u32).saturating_mul(10_000) + id.idx.get()),
+                layer: 0,
+                frame: state.frame,
+                min_frame: CGSize::ZERO,
+                max_frame: CGSize::ZERO,
+            })
+            .collect();
+        crate::sys::window_server::set_visible_windows_override(Some(remaining));
+    }
+
     pub fn make_app(&mut self, pid: pid_t, windows: Vec<WindowInfo>) -> Vec<Event> {
         let frontmost = windows.first().map(|_| WindowId::new(pid, 1));
         self.make_app_with_opts(pid, windows, frontmost, false, true)
