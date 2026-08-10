@@ -5752,7 +5752,7 @@ fn reconcile_reaps_windows_of_dead_apps_even_when_minimized() {
     ));
     let space = SpaceId::new(1);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
 
     // pid 1 is launchd: alive as a process but never an NSRunningApplication,
     // which is exactly what the sweep's liveness check keys on.
@@ -5761,6 +5761,7 @@ fn reconcile_reaps_windows_of_dead_apps_even_when_minimized() {
     let _events = apps.simulate_events();
     let wid = WindowId::new(dead_pid, 1);
     let _ = reactor.layout_manager.layout_engine.handle_event(
+        &mut reactor.state.windows,
         LayoutEvent::WindowsOnScreenUpdated(space, dead_pid, vec![window_update_tuple(wid)], None),
     );
     assert!(reactor.state.windows.window(wid).is_some());
@@ -5806,11 +5807,12 @@ fn reconcile_reaps_layout_only_windows_of_dead_apps() {
     ));
     let space = SpaceId::new(1);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
 
     let live = WindowId::new(std::process::id() as pid_t, 1);
     let ghost = WindowId::new(999_999, 1);
     let _ = reactor.layout_manager.layout_engine.handle_event(
+        &mut reactor.state.windows,
         LayoutEvent::WindowsOnScreenUpdated(
             space,
             live.pid,
@@ -5819,6 +5821,7 @@ fn reconcile_reaps_layout_only_windows_of_dead_apps() {
         ),
     );
     let _ = reactor.layout_manager.layout_engine.handle_event(
+        &mut reactor.state.windows,
         LayoutEvent::WindowsOnScreenUpdated(
             space,
             ghost.pid,

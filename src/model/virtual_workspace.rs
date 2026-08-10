@@ -1290,13 +1290,13 @@ mod tests {
         settings.workspace_names[0] = "one".to_string();
         settings.workspace_names[1] = "two".to_string();
         let mut manager =
-            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+            WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
 
         let space = SpaceId::new(1);
         let ids: Vec<_> = manager.list_workspaces(space).iter().map(|(id, _)| *id).collect();
         let ws0 = ids[0];
 
-        let display_names = |m: &mut VirtualWorkspaceManager| -> Vec<String> {
+        let display_names = |m: &mut WorkspaceStore| -> Vec<String> {
             m.list_workspaces(space).into_iter().map(|(_, n)| n).collect()
         };
 
@@ -1330,13 +1330,13 @@ mod tests {
 
     #[test]
     fn custom_name_roundtrips_through_ron() {
-        let mut manager = VirtualWorkspaceManager::new();
+        let mut manager = WorkspaceStore::new();
         let space = SpaceId::new(1);
         let ws = manager.create_workspace(space, Some("default".to_string())).unwrap();
         assert!(manager.rename_workspace(space, ws, "renamed".to_string()));
 
         let serialized = ron::ser::to_string(&manager).unwrap();
-        let mut restored: VirtualWorkspaceManager = ron::from_str(&serialized).unwrap();
+        let mut restored: WorkspaceStore = ron::from_str(&serialized).unwrap();
         assert_eq!(
             restored.list_workspaces(space).into_iter().find(|(id, _)| *id == ws).unwrap().1,
             "renamed",

@@ -1135,8 +1135,8 @@ mod tests {
         );
 
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
-        assert!(vwm.workspace_for_window_any(old).is_none(), "old id rewritten away");
-        assert!(vwm.workspace_for_window_any(live).is_some(), "live id inherits the slot");
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, old).is_none(), "old id rewritten away");
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, live).is_some(), "live id inherits the slot");
 
         // Claim-once: a second identical window finds no unclaimed entry.
         let dup = WindowId::new(2, 2);
@@ -1174,9 +1174,9 @@ mod tests {
         assert!(reactor.try_adopt_window(live, space).is_some(), "closest-frame candidate adopted");
 
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
-        assert!(vwm.workspace_for_window_any(near).is_none(), "closest candidate rewritten onto live id");
-        assert!(vwm.workspace_for_window_any(live).is_some());
-        assert!(vwm.workspace_for_window_any(far).is_some(), "the farther candidate stays unclaimed");
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, near).is_none(), "closest candidate rewritten onto live id");
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, live).is_some());
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, far).is_some(), "the farther candidate stays unclaimed");
     }
 
     #[test]
@@ -1237,10 +1237,10 @@ mod tests {
         assert!(reactor.try_adopt_window(live, space).is_some());
 
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
-        assert!(vwm.workspace_for_window_any(by_server).is_none(), "exact entry claimed and rewritten");
-        assert!(vwm.workspace_for_window_any(live).is_some());
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, by_server).is_none(), "exact entry claimed and rewritten");
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, live).is_some());
         assert!(
-            vwm.workspace_for_window_any(by_attr).is_some(),
+            vwm.workspace_for_window_any(&reactor.state.windows, by_attr).is_some(),
             "fuzzy candidate untouched when an exact hit wins"
         );
     }
@@ -1249,7 +1249,7 @@ mod tests {
     fn prune_app_adoptions_keys_on_bundle_after_reboot() {
         let space = SpaceId::new(1);
         let mut reactor = Reactor::new_for_test(fresh_engine());
-        reactor.space_manager.screens = one_screen_snapshots(space);
+        reactor.space_state.screens = one_screen_snapshots(space);
         // Pre-reboot the window lived under pid 1.
         let dead = WindowId::new(1, 1);
         place_in_engine(&mut reactor, space, &[dead]);
@@ -1266,7 +1266,7 @@ mod tests {
 
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
         assert!(
-            vwm.workspace_for_window_any(dead).is_none(),
+            vwm.workspace_for_window_any(&reactor.state.windows, dead).is_none(),
             "bundle-keyed prune reaps the entry despite the pid change"
         );
     }
@@ -1320,7 +1320,7 @@ mod tests {
         place_in_engine(&mut reactor, saved_2, &[w2]);
 
         // test-display-0 now shows SpaceId 2, test-display-1 now shows SpaceId 3.
-        reactor.space_manager.screens = two_screen_snapshots(live_2, live_3);
+        reactor.space_state.screens = two_screen_snapshots(live_2, live_3);
         let mut saved = HashMap::default();
         saved.insert(saved_1, ("test-display-0".to_string(), 0u32));
         saved.insert(saved_2, ("test-display-1".to_string(), 0u32));
@@ -1329,10 +1329,10 @@ mod tests {
         reactor.remap_restored_spaces();
 
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
-        assert!(vwm.workspace_for_window(live_2, w1).is_some(), "saved-1 migrated to live space 2");
-        assert!(vwm.workspace_for_window(live_3, w2).is_some(), "saved-2 migrated to live space 3");
+        assert!(vwm.workspace_for_window(&reactor.state.windows, live_2, w1).is_some(), "saved-1 migrated to live space 2");
+        assert!(vwm.workspace_for_window(&reactor.state.windows, live_3, w2).is_some(), "saved-2 migrated to live space 3");
         assert!(
-            vwm.workspace_for_window(live_3, w1).is_none(),
+            vwm.workspace_for_window(&reactor.state.windows, live_3, w1).is_none(),
             "saved-1 did not bleed onto space 3"
         );
     }
@@ -1343,7 +1343,7 @@ mod tests {
         // would stamp a bogus "" arrangement over the file. The guard skips it.
         let mut reactor = Reactor::new_for_test(fresh_engine());
         place_in_engine(&mut reactor, SpaceId::new(1), &[WindowId::new(1, 1)]);
-        reactor.space_manager.screens = Vec::new();
+        reactor.space_state.screens = Vec::new();
 
         let path = std::env::temp_dir()
             .join(format!("rift-blackout-{}-{}.ron", std::process::id(), line!()));
@@ -1398,7 +1398,7 @@ mod tests {
         // per-app prune must NOT evict it — its window still exists — but adopt it.
         let space = SpaceId::new(1);
         let mut reactor = Reactor::new_for_test(fresh_engine());
-        reactor.space_manager.screens = one_screen_snapshots(space);
+        reactor.space_state.screens = one_screen_snapshots(space);
         let active = WindowId::new(1, 1);
         let hidden = WindowId::new(1, 2);
         place_in_engine(&mut reactor, space, &[active, hidden]);
@@ -1418,9 +1418,9 @@ mod tests {
         reactor.prune_app_adoptions(1);
 
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
-        assert!(vwm.workspace_for_window_any(active).is_some(), "active window kept");
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, active).is_some(), "active window kept");
         assert!(
-            vwm.workspace_for_window_any(hidden).is_some(),
+            vwm.workspace_for_window_any(&reactor.state.windows, hidden).is_some(),
             "still-alive inactive-workspace window is adopted, not pruned"
         );
         assert!(
@@ -1441,7 +1441,7 @@ mod tests {
         let s1 = SpaceId::new(1);
         let s2 = SpaceId::new(2);
         let mut reactor = Reactor::new_for_test(fresh_engine());
-        reactor.space_manager.screens = two_screen_snapshots(s1, s2);
+        reactor.space_state.screens = two_screen_snapshots(s1, s2);
         let hidden = WindowId::new(1, 1);
         place_in_engine(&mut reactor, s2, &[hidden]);
 
@@ -1454,7 +1454,7 @@ mod tests {
 
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
         assert!(
-            vwm.workspace_for_window(s2, hidden).is_some(),
+            vwm.workspace_for_window(&reactor.state.windows, s2, hidden).is_some(),
             "inactive-workspace window on the secondary display survives and stays on its space"
         );
         assert!(reactor.persistence.adoption.is_empty(), "the survivor was adopted");
@@ -1467,7 +1467,7 @@ mod tests {
         // timeout must still evict them (no server-id reprieve — the window is gone).
         let space = SpaceId::new(1);
         let mut reactor = Reactor::new_for_test(fresh_engine());
-        reactor.space_manager.screens = one_screen_snapshots(space);
+        reactor.space_state.screens = one_screen_snapshots(space);
         let gone_a = WindowId::new(9, 1);
         let gone_b = WindowId::new(9, 2);
         place_in_engine(&mut reactor, space, &[gone_a, gone_b]);
@@ -1482,8 +1482,8 @@ mod tests {
         reactor.prune_settled_adoptions();
 
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
-        assert!(vwm.workspace_for_window_any(gone_a).is_none(), "dead window evicted by timeout");
-        assert!(vwm.workspace_for_window_any(gone_b).is_none(), "dead window evicted by timeout");
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, gone_a).is_none(), "dead window evicted by timeout");
+        assert!(vwm.workspace_for_window_any(&reactor.state.windows, gone_b).is_none(), "dead window evicted by timeout");
         assert!(reactor.persistence.adoption.is_empty(), "table drained by the settle backstop");
         assert!(reactor.persistence.settle_deadline.is_none(), "restore finalized once, timer disarmed");
     }
@@ -1534,7 +1534,7 @@ mod tests {
     fn assemble_persists_only_explicit_topmost_pins() {
         let space = SpaceId::new(1);
         let mut reactor = Reactor::new_for_test(fresh_engine());
-        reactor.space_manager.screens = one_screen_snapshots(space);
+        reactor.space_state.screens = one_screen_snapshots(space);
         let explicit = WindowId::new(1, 1);
         let implicit = WindowId::new(1, 2);
         place_in_engine(&mut reactor, space, &[explicit, implicit]);
@@ -1595,7 +1595,7 @@ mod tests {
     fn custom_workspace_name_roundtrips_through_the_snapshot() {
         let space = SpaceId::new(1);
         let mut reactor = Reactor::new_for_test(fresh_engine());
-        reactor.space_manager.screens = one_screen_snapshots(space);
+        reactor.space_state.screens = one_screen_snapshots(space);
         let w = WindowId::new(1, 1);
         place_in_engine(&mut reactor, space, &[w]);
         register_live(&mut reactor, w, 101);
@@ -1784,8 +1784,8 @@ mod tests {
         let (orig_a, orig_b) = {
             let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
             (
-                vwm.workspace_for_window(s1, wa).expect("wa on space1"),
-                vwm.workspace_for_window(s2, wb).expect("wb on space2"),
+                vwm.workspace_for_window(&reactor.state.windows, s1, wa).expect("wa on space1"),
+                vwm.workspace_for_window(&reactor.state.windows, s2, wb).expect("wb on space2"),
             )
         };
         reactor.flush_snapshot();
@@ -1802,7 +1802,7 @@ mod tests {
                 .layout_manager
                 .layout_engine
                 .virtual_workspace_manager()
-                .workspace_for_window_any(wa)
+                .workspace_for_window_any(&reactor.state.windows, wa)
                 .is_none(),
             "two-display state is gone while the display is unplugged"
         );
@@ -1816,12 +1816,12 @@ mod tests {
 
         let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
         assert_eq!(
-            vwm.workspace_for_window(s1, wa),
+            vwm.workspace_for_window(&reactor.state.windows, s1, wa),
             Some(orig_a),
             "wa restored to its original workspace on space1"
         );
         assert_eq!(
-            vwm.workspace_for_window(s2, wb),
+            vwm.workspace_for_window(&reactor.state.windows, s2, wb),
             Some(orig_b),
             "wb restored to its original workspace on space2"
         );

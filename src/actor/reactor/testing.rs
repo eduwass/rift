@@ -50,6 +50,47 @@ pub fn space_state_event(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) -> E
     space_state_event_from_screens(make_screen_snapshots(frames, spaces))
 }
 
+/// One entry of `LayoutEvent::WindowsOnScreenUpdated`'s window list: resizable, no
+/// title/role/subrole, and no size hints or min/max constraints.
+pub fn window_update_tuple(
+    wid: WindowId,
+) -> (
+    WindowId,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+    CGSize,
+    Option<CGSize>,
+    Option<CGSize>,
+) {
+    (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None)
+}
+
+/// Whether the space's tiled layout still hands screen space to any window of `pid`.
+/// Used by the orphan-reap tests, where the point is that a reaped window stops
+/// occupying a tile — not merely that it left the window store.
+pub fn has_windows_in_layout(
+    reactor: &mut Reactor,
+    space: SpaceId,
+    screen: CGRect,
+    pid: pid_t,
+) -> bool {
+    reactor
+        .layout_manager
+        .layout_engine
+        .calculate_layout(
+            space,
+            screen,
+            &Default::default(),
+            0.0,
+            Default::default(),
+            Default::default(),
+        )
+        .into_iter()
+        .any(|(wid, _)| wid.pid == pid)
+}
+
 pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
     let command_space = screens.iter().find_map(|screen| screen.space);
     let active_spaces = screens.iter().filter_map(|screen| screen.space).collect();

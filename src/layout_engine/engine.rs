@@ -4420,7 +4420,7 @@ mod tests {
             windows.iter().map(|w| engine.is_window_floating(*w)).collect();
         let mapping_before: Vec<_> = windows
             .iter()
-            .map(|w| engine.virtual_workspace_manager().workspace_for_window_any(*w))
+            .map(|w| engine.virtual_workspace_manager().workspace_for_window_any(&window_store, *w))
             .collect();
 
         let serialized = engine.serialize_to_string();
@@ -4449,7 +4449,9 @@ mod tests {
             windows.iter().map(|w| restored.is_window_floating(*w)).collect();
         let mapping_after: Vec<_> = windows
             .iter()
-            .map(|w| restored.virtual_workspace_manager().workspace_for_window_any(*w))
+            .map(|w| {
+                restored.virtual_workspace_manager().workspace_for_window_any(&window_store, *w)
+            })
             .collect();
 
         assert_eq!(names_before, names_after, "workspace names survive the roundtrip");
@@ -4487,22 +4489,28 @@ mod tests {
     #[test]
     fn rewrite_window_id_preserves_tiled_placement() {
         let mut engine = test_engine();
+        let mut window_store = WindowStore::default();
         let space = SpaceId::new(1);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 1000.0));
         let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
 
         let old = WindowId::new(1, 1);
         let sibling = WindowId::new(1, 2);
-        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
-        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space,
-            1,
-            vec![window_info(old), window_info(sibling)],
-            None,
-        ));
+        let _ = engine
+            .handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowsOnScreenUpdated(
+                space,
+                1,
+                vec![window_info(old), window_info(sibling)],
+                None,
+            ),
+        );
         // Skew the split so a lost ratio would be detectable.
-        let _ = engine.handle_event(LayoutEvent::WindowFocused(space, old));
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, old));
         let _ = engine.handle_command(
+            &mut window_store,
             Some(space),
             &[space],
             &HashMap::default(),
@@ -4539,11 +4547,14 @@ mod tests {
         assert_eq!(frame_of(&layout_before, sibling), frame_of(&layout_after, sibling));
         assert!(frame_of(&layout_after, old).is_none(), "old id must be gone");
         assert_eq!(
-            engine.virtual_workspace_manager().workspace_for_window_any(old),
+            engine.virtual_workspace_manager().workspace_for_window_any(&window_store, old),
             None
         );
         assert!(
-            engine.virtual_workspace_manager().workspace_for_window_any(new).is_some(),
+            engine
+                .virtual_workspace_manager()
+                .workspace_for_window_any(&window_store, new)
+                .is_some(),
             "new id inherits the workspace mapping"
         );
     }
@@ -4551,19 +4562,24 @@ mod tests {
     #[test]
     fn rewrite_window_id_preserves_floating_state() {
         let mut engine = test_engine();
+        let mut window_store = WindowStore::default();
         let space = SpaceId::new(1);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 1000.0));
         let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
 
         let tiled = WindowId::new(1, 1);
         let old = WindowId::new(1, 2);
-        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
-        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space,
-            1,
-            vec![window_info(tiled), window_info(old)],
-            None,
-        ));
+        let _ = engine
+            .handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowsOnScreenUpdated(
+                space,
+                1,
+                vec![window_info(tiled), window_info(old)],
+                None,
+            ),
+        );
         engine.ensure_window_floating(space, old);
         assert!(engine.is_window_floating(old));
 
@@ -4578,27 +4594,42 @@ mod tests {
     #[test]
     fn rewrite_window_id_is_a_noop_for_absent_or_identical_ids() {
         let mut engine = test_engine();
+        let mut window_store = WindowStore::default();
         let space = SpaceId::new(1);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 1000.0));
         let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
         let w1 = WindowId::new(1, 1);
-        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
-        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space,
-            1,
-            vec![window_info(w1)],
-            None,
-        ));
+        let _ = engine
+            .handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowsOnScreenUpdated(space, 1, vec![window_info(w1)], None),
+        );
 
         // Identical ids: nothing changes.
         engine.rewrite_window_id(w1, w1);
-        assert!(engine.virtual_workspace_manager().workspace_for_window_any(w1).is_some());
+        assert!(
+            engine
+                .virtual_workspace_manager()
+                .workspace_for_window_any(&window_store, w1)
+                .is_some()
+        );
 
         // Absent id: the present window is untouched and no phantom appears.
         let absent = WindowId::new(999, 9);
         let ghost = WindowId::new(888, 8);
         engine.rewrite_window_id(absent, ghost);
-        assert!(engine.virtual_workspace_manager().workspace_for_window_any(ghost).is_none());
-        assert!(engine.virtual_workspace_manager().workspace_for_window_any(w1).is_some());
+        assert!(
+            engine
+                .virtual_workspace_manager()
+                .workspace_for_window_any(&window_store, ghost)
+                .is_none()
+        );
+        assert!(
+            engine
+                .virtual_workspace_manager()
+                .workspace_for_window_any(&window_store, w1)
+                .is_some()
+        );
     }
 }
