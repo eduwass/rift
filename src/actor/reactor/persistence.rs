@@ -205,6 +205,14 @@ impl PersistenceState {
     fn enabled(&self) -> bool {
         self.restore_path.is_some()
     }
+
+    /// True while a restored arrangement is still waiting for its windows to be
+    /// re-adopted. Until that drains, the engine's trees hold pre-restart window
+    /// ids whose processes are all long dead, so anything that reaps by liveness
+    /// must stand down (see [`Reactor::orphan_reconcile_outcome`]).
+    pub(super) fn adoption_pending(&self) -> bool {
+        !self.adoption.is_empty() || self.settle_deadline.is_some()
+    }
 }
 
 impl Reactor {

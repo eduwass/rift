@@ -676,13 +676,20 @@ impl Reactor {
 
         let mut tracked_pids: HashSet<pid_t> = self.app_manager.apps.keys().copied().collect();
         tracked_pids.extend(self.state.windows.iter_windows().map(|(wid, _)| wid.pid));
-        for space in self.iter_active_spaces() {
+        // Layout trees outlive the window store. A window whose process dies while its
+        // workspace is inactive can be dropped from the store while its leaf stays in
+        // the tree, and no per-pid reaper can see it after that: the store no longer
+        // lists the window, and a dead process never emits another AX event. The leaf
+        // still reserves its share of the screen, so the surviving windows tile into a
+        // fraction of the display (and the orphan round-trips through layout.ron, so
+        // restarting rift does not clear it). Source pids from every workspace tree,
+        // not just the active one's store-backed windows, so the dead-process reap
+        // below emits `AppClosed` and prunes those leaves. Held back while restore
+        // adoption is still draining: a freshly restored tree legitimately holds
+        // pre-restart pids, all of them dead, until their windows are re-adopted.
+        if !self.persistence.adoption_pending() {
             tracked_pids.extend(
-                self.layout_manager
-                    .layout_engine
-                    .windows_in_active_workspace(&self.state.windows, space)
-                    .into_iter()
-                    .map(|wid| wid.pid),
+                self.layout_manager.layout_engine.all_window_ids().into_iter().map(|w| w.pid),
             );
         }
         let mut dead_pids: HashSet<pid_t> = HashSet::default();
