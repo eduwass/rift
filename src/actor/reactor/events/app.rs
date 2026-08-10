@@ -35,12 +35,18 @@ pub fn handle_application_launched(
         "application registered"
     );
     apps.apps.insert(pid, AppState { info: info.clone(), handle });
+    // Launch-time windows are both newly discovered and currently visible. Passing
+    // them only as `new` with an empty `known_visible` leaves emit_layout_events
+    // with nothing to tile once refresh_visible_windows_snapshot replaces the
+    // just-applied window-server visible set (in tests: empty / unrelated CG
+    // windows; in production: a race before the app's ids appear on-screen).
+    let known_visible: Vec<WindowId> = visible_windows.iter().map(|(wid, _)| *wid).collect();
     Ok(EventOutcome::finalized_event(None, false, false, true)
         .with_window_server_updates(window_server_info)
         .with_discovery(WindowDiscoveryRequest {
             pid,
             new: visible_windows,
-            known_visible: Vec::new(),
+            known_visible,
             app_info: Some(info),
         }))
 }

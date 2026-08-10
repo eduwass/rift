@@ -178,6 +178,8 @@ pub struct TestWindowState {
 
 impl Apps {
     pub fn new() -> Apps {
+        // Isolate each harness from prior tests' synthetic window-server membership.
+        crate::sys::window_server::clear_visible_windows_override();
         let (tx, rx) = actor::channel();
         Apps {
             tx,
@@ -219,6 +221,26 @@ impl Apps {
             });
         }
         let handle = AppThreadHandle::new_for_test(self.tx.clone());
+        let window_server_info: Vec<WindowServerInfo> = if with_ws_info {
+            windows
+                .iter()
+                .map(|info| WindowServerInfo {
+                    pid,
+                    id: info.sys_id.unwrap(),
+                    layer: 0,
+                    frame: info.frame,
+                    min_frame: CGSize::ZERO,
+                    max_frame: CGSize::ZERO,
+                })
+                .collect()
+        } else {
+            Default::default()
+        };
+        // Keep refresh_visible_windows_snapshot from erasing the synthetic
+        // on-screen set ApplicationLaunched just applied via window_server_info.
+        for info in &window_server_info {
+            crate::sys::window_server::register_visible_window_override(*info);
+        }
         vec![Event::ApplicationLaunched {
             pid,
             info: AppInfo {
@@ -228,21 +250,7 @@ impl Apps {
             handle,
             is_frontmost,
             main_window,
-            window_server_info: if with_ws_info {
-                windows
-                    .iter()
-                    .map(|info| WindowServerInfo {
-                        pid,
-                        id: info.sys_id.unwrap(),
-                        layer: 0,
-                        frame: info.frame,
-                        min_frame: CGSize::ZERO,
-                        max_frame: CGSize::ZERO,
-                    })
-                    .collect()
-            } else {
-                Default::default()
-            },
+            window_server_info,
             visible_windows: (1..).map(|idx| WindowId::new(pid, idx)).zip(windows).collect(),
         }]
     }

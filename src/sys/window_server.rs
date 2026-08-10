@@ -40,6 +40,10 @@ thread_local! {
     static TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE: RefCell<HashMap<u64, Vec<u32>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_SPACES_OVERRIDE: RefCell<HashMap<u32, Vec<u64>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_ORDERED_IN_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
+    // Default empty: never query the live CG window list from unit tests. Tests that
+    // need on-screen membership register synthetic ids via set_visible_windows_override.
+    static TEST_VISIBLE_WINDOWS_OVERRIDE: RefCell<Option<Vec<WindowServerInfo>>> =
+        const { RefCell::new(Some(Vec::new())) };
 }
 
 pub const WINDOWSERVER_QUIET_US: u64 = 350_000;
@@ -281,6 +285,16 @@ pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
 /// Prefer space-actor membership for ordinary reactor reconciliation. This remains
 /// useful for orphan reclaim / debug queries that need the raw CG on-screen set.
 pub fn get_visible_windows_with_layer(layer: Option<i32>) -> Vec<WindowServerInfo> {
+    #[cfg(test)]
+    if let Some(override_windows) =
+        TEST_VISIBLE_WINDOWS_OVERRIDE.with(|windows| windows.borrow().clone())
+    {
+        return override_windows
+            .into_iter()
+            .filter(|info| layer.is_none_or(|wanted| info.layer == wanted))
+            .collect();
+    }
+
     get_visible_windows_raw::<CFDictionary<CFString, CFType>>()
         .iter()
         .filter_map(|win| make_info(&win, layer))
@@ -709,6 +723,31 @@ pub fn space_window_list_for_connection(
 
     windows.shrink_to_fit();
     windows
+}
+
+#[cfg(test)]
+pub fn set_visible_windows_override(windows: Option<Vec<WindowServerInfo>>) {
+    TEST_VISIBLE_WINDOWS_OVERRIDE.with(|override_windows| {
+        *override_windows.borrow_mut() = windows;
+    });
+}
+
+#[cfg(test)]
+pub fn register_visible_window_override(info: WindowServerInfo) {
+    TEST_VISIBLE_WINDOWS_OVERRIDE.with(|override_windows| {
+        let mut override_windows = override_windows.borrow_mut();
+        let windows = override_windows.get_or_insert_with(Vec::new);
+        if let Some(existing) = windows.iter_mut().find(|window| window.id == info.id) {
+            *existing = info;
+        } else {
+            windows.push(info);
+        }
+    });
+}
+
+#[cfg(test)]
+pub fn clear_visible_windows_override() {
+    set_visible_windows_override(Some(Vec::new()));
 }
 
 #[cfg(test)]
