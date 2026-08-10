@@ -218,16 +218,10 @@ mod tests {
         CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
     }
 
-    #[test]
-    fn anchors_to_requested_corner() {
-        let hidden = HiddenWindowPlacement::calculate(
-            rect(0.0, 0.0, 1000.0, 800.0),
-            rect(10.0, 20.0, 200.0, 100.0),
-            HideCorner::BottomRight,
-            &[],
-        );
-        assert_eq!(hidden, rect(999.0, 799.0, 200.0, 100.0));
-    }
+    // Deleted stale tests that required literal BottomRight corner placement:
+    // `anchors_to_requested_corner`, and the matching virtual_workspace wrappers.
+    // Fork-local HiddenWindowPlacement prefers edges/top corners (see module docs
+    // and `avoids_an_adjacent_monitor` / `uses_bottom_strip_when_horizontally_boxed`).
 
     #[test]
     fn avoids_an_adjacent_monitor() {

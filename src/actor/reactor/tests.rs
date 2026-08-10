@@ -3683,6 +3683,14 @@ fn animated_layout_handles_windows_without_server_ids() {
     ));
     apps.requests();
 
+    // Launch may already have tiled the window to the screen; restore a distinct
+    // starting frame so animate_layout has a real delta to apply.
+    let start = CGRect::new(CGPoint::new(50., 50.), CGSize::new(400., 400.));
+    if let Some(state) = reactor.state.windows.window_mut(WindowId::new(1, 1)) {
+        assert!(state.info.sys_id.is_none(), "test requires no window-server id");
+        state.frame_monotonic = start;
+    }
+
     let target = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     assert!(super::animation::AnimationManager::animate_layout(
         &mut reactor,

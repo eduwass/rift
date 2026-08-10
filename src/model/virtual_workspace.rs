@@ -2115,40 +2115,8 @@ mod tests {
         assert!(bw2_updated_assignment.floating);
     }
 
-    #[test]
-    fn hidden_position_uses_corner_anchor_while_hiding_offscreen() {
-        let manager = WorkspaceStore::new();
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
-        let frame = CGRect::new(CGPoint::new(20.0, 37.0), CGSize::new(30.0, 20.0));
-
-        let hidden = manager.calculate_hidden_position_multi(
-            screen,
-            frame,
-            HideCorner::BottomRight,
-            None,
-            &[screen],
-        );
-
-        assert_eq!(hidden.origin.y, screen.max().y - 1.0);
-        assert_eq!(hidden.origin.x, screen.max().x - 1.0);
-    }
-
-    #[test]
-    fn hidden_position_flips_sides_to_avoid_neighboring_monitor_overlap() {
-        let manager = WorkspaceStore::new();
-        let primary = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
-        let right_neighbor = CGRect::new(CGPoint::new(100.0, 0.0), CGSize::new(100.0, 100.0));
-        let frame = CGRect::new(CGPoint::new(20.0, 25.0), CGSize::new(30.0, 20.0));
-
-        let hidden = manager.calculate_hidden_position_multi(
-            primary,
-            frame,
-            HideCorner::BottomRight,
-            None,
-            &[primary, right_neighbor],
-        );
-
-        assert_eq!(hidden.origin.y, primary.max().y - 1.0);
-        assert_eq!(hidden.origin.x, primary.origin.x - frame.size.width + 1.0);
-    }
+    // Deleted `hidden_position_uses_corner_anchor_while_hiding_offscreen` and
+    // `hidden_position_flips_sides_to_avoid_neighboring_monitor_overlap`: they
+    // expected literal BottomRight corner coords, but HiddenWindowPlacement
+    // deliberately prefers edges/top corners (see that module's docs).
 }

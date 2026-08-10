@@ -216,10 +216,13 @@ impl Apps {
             .enumerate()
             .map(|(idx, mut info)| {
                 // Keep synthetic window-server ids unique across apps so tests
-                // exercise the same invariants as production.
-                info.sys_id = Some(WindowServerId::new(
-                    (pid as u32).saturating_mul(10_000) + idx as u32 + 1,
-                ));
+                // exercise the same invariants as production. Leave an explicit
+                // None alone when the caller opted out of window-server info.
+                if with_ws_info || info.sys_id.is_some() {
+                    info.sys_id = Some(WindowServerId::new(
+                        (pid as u32).saturating_mul(10_000) + idx as u32 + 1,
+                    ));
+                }
                 info
             })
             .collect();
