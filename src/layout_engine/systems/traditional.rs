@@ -4,6 +4,7 @@ use tracing::warn;
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
+use crate::common::config::TraditionalSettings;
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
@@ -16,14 +17,37 @@ use crate::sys::geometry::Round;
 pub struct TraditionalLayoutSystem {
     pub(crate) tree: Tree<Components>,
     pub(crate) layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
+    /// Config-derived, re-applied on hot reload and after a snapshot load, so a
+    /// snapshot written under one config never pins the next run's behavior.
+    #[serde(skip)]
+    settings: TraditionalSettings,
 }
 
 impl Default for TraditionalLayoutSystem {
-    fn default() -> Self {
+    fn default() -> Self { Self::new(&TraditionalSettings::default()) }
+}
+
+impl TraditionalLayoutSystem {
+    pub fn new(settings: &TraditionalSettings) -> Self {
         Self {
             tree: Tree::with_observer(Components::default()),
             layout_roots: Default::default(),
+            settings: *settings,
         }
+    }
+
+    pub fn update_settings(&mut self, settings: &TraditionalSettings) { self.settings = *settings; }
+
+    /// How many children a row may hold before a new window nests instead of
+    /// becoming another column. `None` when the configured cap doesn't apply.
+    fn column_cap(&self, parent_layout: LayoutKind) -> Option<usize> {
+        if self.settings.max_columns == 0 {
+            return None;
+        }
+        // The cap counts columns, so it only governs horizontal containers —
+        // that's what keeps rows inside a column uncapped. A cap of 1 can't be
+        // honored (nesting needs a sibling to nest against), so 2 is the floor.
+        matches!(parent_layout, LayoutKind::Horizontal).then(|| self.settings.max_columns.max(2))
     }
 }
 
@@ -70,13 +94,27 @@ impl TraditionalLayoutSystem {
         if let Some(parent) = parent {
             let parent_layout = self.layout(parent);
             let sibling_count = parent.children(self.map()).count();
+            // With `max_columns` set, a full row nests the new window against the
+            // focused column, turning that column into rows. Without it, stock
+            // behavior nests once a container holds 4 regardless of orientation.
+            let (nest, nest_kind) = match self.column_cap(parent_layout) {
+                // The cap only applies to horizontal rows, so the column it turns
+                // into always splits vertically.
+                Some(cap) => (sibling_count >= cap, LayoutKind::Vertical),
+                None if self.settings.max_columns > 0 => (false, parent_layout),
+                None => (sibling_count >= 4, parent_layout),
+            };
 
-            if sibling_count >= 4 && !parent_layout.is_group() {
-                let sub_container =
-                    self.nest_in_container_internal(layout, selection, parent_layout);
+            if nest && !parent_layout.is_group() {
+                let sub_container = self.nest_in_container_internal(layout, selection, nest_kind);
                 let node = self.tree.mk_node().push_back(sub_container);
                 self.split_new_sibling_from_selection(selection, node);
                 self.tree.data.window.set_window(layout, node, wid);
+                // The sub-container inherited the column's width, so the row is
+                // already even; only its two new rows need equalizing.
+                if self.settings.even_sizes {
+                    self.equalize_children(sub_container);
+                }
                 return node;
             }
         }
@@ -84,7 +122,26 @@ impl TraditionalLayoutSystem {
         let node = self.tree.mk_node().insert_after(selection);
         self.split_new_sibling_from_selection(selection, node);
         self.tree.data.window.set_window(layout, node, wid);
+        if self.settings.even_sizes
+            && let Some(parent) = node.parent(self.map())
+        {
+            self.equalize_children(parent);
+        }
         node
+    }
+
+    /// Give every direct child of `node` an equal share. Stops at one level, so a
+    /// nested container keeps whatever ratios its own children were given — only
+    /// the row being inserted into is reset.
+    fn equalize_children(&mut self, node: NodeId) {
+        let children: Vec<_> = node.children(&self.tree.map).collect();
+        if children.is_empty() {
+            return;
+        }
+        for &child in &children {
+            self.tree.data.layout.info[child].size = 1.0;
+        }
+        self.tree.data.layout.info[node].total = children.len() as f32;
     }
 
     fn find_or_create_smart_common_parent(
@@ -1673,7 +1730,19 @@ impl TraditionalLayoutSystem {
             return;
         }
 
-        let weights: Vec<_> = children.iter().map(|&child| self.leaf_weight(child)).collect();
+        // `even_sizes` divides each container equally, so a column holding three
+        // stacked windows is still one third of a three-column row. The stock rule
+        // weights by window count instead, making that column three times as wide.
+        let weights: Vec<_> = children
+            .iter()
+            .map(|&child| {
+                if self.settings.even_sizes {
+                    1.0
+                } else {
+                    self.leaf_weight(child)
+                }
+            })
+            .collect();
         let total: f32 = weights.iter().sum();
         self.tree.data.layout.info[node].total = total;
         for (&child, weight) in children.iter().zip(weights) {
@@ -3138,6 +3207,125 @@ mod tests {
     use crate::layout_engine::{Direction, LayoutKind};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    /// A horizontal-root system with `even_sizes` on and the given column cap.
+    fn even_system(max_columns: usize) -> (TraditionalLayoutSystem, LayoutId, NodeId) {
+        let mut system =
+            TraditionalLayoutSystem::new(&TraditionalSettings { even_sizes: true, max_columns });
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        (system, layout, root)
+    }
+
+    fn size_of(system: &TraditionalLayoutSystem, node: NodeId) -> f32 {
+        system.tree.data.layout.info[node].size
+    }
+
+    #[test]
+    fn even_sizes_gives_every_column_an_equal_share() {
+        let (mut system, layout, root) = even_system(0);
+        for idx in 0..3 {
+            system.add_window_after_selection(layout, w(600 + idx));
+        }
+
+        let sizes: Vec<f32> = root
+            .children(system.map())
+            .map(|child| system.tree.data.layout.info[child].size)
+            .collect();
+        assert_eq!(sizes.len(), 3);
+        for size in &sizes {
+            assert!((size - 1.0).abs() < 0.0001, "expected equal thirds, got {sizes:?}");
+        }
+        assert!((system.tree.data.layout.info[root].total - 3.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn stock_insert_still_halves_the_focused_slot() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        for idx in 0..3 {
+            system.add_window_after_selection(layout, w(610 + idx));
+        }
+
+        let n1 = system.tree.data.window.node_for(layout, w(610)).unwrap();
+        let n2 = system.tree.data.window.node_for(layout, w(611)).unwrap();
+        let n3 = system.tree.data.window.node_for(layout, w(612)).unwrap();
+        assert!((size_of(&system, n1) - 0.5).abs() < 0.0001);
+        assert!((size_of(&system, n2) - 0.25).abs() < 0.0001);
+        assert!((size_of(&system, n3) - 0.25).abs() < 0.0001);
+    }
+
+    #[test]
+    fn column_cap_turns_the_next_window_into_a_row_of_the_focused_column() {
+        let (mut system, layout, root) = even_system(3);
+        for idx in 0..4 {
+            system.add_window_after_selection(layout, w(620 + idx));
+        }
+
+        let columns: Vec<NodeId> = root.children(system.map()).collect();
+        assert_eq!(columns.len(), 3, "the cap must hold the row at three columns");
+        for &column in &columns {
+            assert!(
+                (size_of(&system, column) - 1.0).abs() < 0.0001,
+                "columns stay equal even when one of them holds two windows"
+            );
+        }
+
+        // The focused column (the third) became a vertical pair, in insertion order.
+        let stacked = columns[2];
+        assert_eq!(system.layout(stacked), LayoutKind::Vertical);
+        let rows: Vec<NodeId> = stacked.children(system.map()).collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(system.tree.data.window.at(rows[0]), Some(w(622)));
+        assert_eq!(system.tree.data.window.at(rows[1]), Some(w(623)));
+        for &row in &rows {
+            assert!((size_of(&system, row) - 1.0).abs() < 0.0001, "rows split the column evenly");
+        }
+    }
+
+    #[test]
+    fn rows_within_a_capped_column_are_uncapped() {
+        let (mut system, layout, root) = even_system(3);
+        for idx in 0..6 {
+            system.add_window_after_selection(layout, w(630 + idx));
+        }
+
+        let columns: Vec<NodeId> = root.children(system.map()).collect();
+        assert_eq!(columns.len(), 3, "no further columns past the cap");
+        let stacked = columns[2];
+        let rows: Vec<NodeId> = stacked.children(system.map()).collect();
+        assert_eq!(rows.len(), 4, "windows 4-6 stack as rows without nesting further");
+        for &row in &rows {
+            assert!((size_of(&system, row) - 1.0).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn even_sizes_rebalance_ignores_how_many_windows_a_column_holds() {
+        let (mut system, layout, root) = even_system(3);
+        for idx in 0..4 {
+            system.add_window_after_selection(layout, w(640 + idx));
+        }
+
+        let columns: Vec<NodeId> = root.children(system.map()).collect();
+        system.tree.data.layout.info[columns[0]].size = 4.0;
+        system.tree.data.layout.info[columns[1]].size = 1.0;
+        system.tree.data.layout.info[columns[2]].size = 3.0;
+        system.tree.data.layout.info[root].total = 8.0;
+
+        system.rebalance(layout);
+
+        for &column in &columns {
+            assert!(
+                (size_of(&system, column) - 1.0).abs() < 0.0001,
+                "the two-window column must not get a double share"
+            );
+        }
+        assert!((system.tree.data.layout.info[root].total - 3.0).abs() < 0.0001);
+    }
 
     #[test]
     fn window_in_direction_prefers_leftmost_when_moving_right() {

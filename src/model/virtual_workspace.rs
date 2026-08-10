@@ -111,7 +111,7 @@ impl VirtualWorkspace {
     pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
         match mode {
             LayoutMode::Traditional => LayoutSystemKind::Traditional(
-                crate::layout_engine::systems::TraditionalLayoutSystem::default(),
+                crate::layout_engine::systems::TraditionalLayoutSystem::new(&settings.traditional),
             ),
             LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::systems::BspLayoutSystem::default())

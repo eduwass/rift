@@ -80,6 +80,20 @@ hot_reload = true
 # You can set different layouts per workspace using `workspace_rules`.
 mode = "traditional"
 
+# these settings only apply when layout mode == "traditional"
+[settings.layout.traditional]
+# Split each container equally instead of halving the focused window's slot.
+# Two windows are 50/50, three are thirds, and so on. This also changes what
+# `layout rebalance` does: each container is divided equally, so a column holding
+# three stacked windows is still one third of a three-column row (the default
+# weights it by window count, making that column three times as wide).
+even_sizes = false
+# Maximum number of side-by-side columns. Once a row is at the cap, a new window
+# splits the focused column vertically instead of adding another column; rows
+# within a column are not capped. Values below 2 are treated as 2.
+# 0 (default) = unlimited.
+max_columns = 0
+
 # these settings only apply when layout mode == "master_stack"
 [settings.layout.master_stack]
 # Fraction of space reserved for the master area (0.05..0.95)

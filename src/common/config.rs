@@ -610,12 +610,37 @@ impl StackLineSettings {
     pub fn thickness(&self) -> f64 { if self.enabled { self.thickness } else { 0.0 } }
 }
 
+/// Settings for the traditional layout system. Both fields default to stock
+/// i3-style behavior, so an absent `[settings.layout.traditional]` section
+/// changes nothing.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(deny_unknown_fields)]
+pub struct TraditionalSettings {
+    /// Split a container's space equally between its children instead of halving
+    /// the focused window's slot. Applies to inserting a window (2 windows are
+    /// 50/50, 3 are thirds, …) and to `layout rebalance`, which then divides each
+    /// container equally rather than weighting sub-containers by how many windows
+    /// they hold. Default off (stock behavior).
+    #[serde(default)]
+    pub even_sizes: bool,
+    /// Maximum number of side-by-side columns in a row. Once a row is at the cap,
+    /// a new window splits the focused column vertically instead of adding another
+    /// column; rows within a column stay uncapped. Values below 2 are treated as
+    /// 2. Default 0 — unlimited, keeping stock behavior (which nests a new window
+    /// alongside the focused one once a container holds 4).
+    #[serde(default)]
+    pub max_columns: usize,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutSettings {
     /// Layout mode: "traditional", "bsp", "stack", "master_stack", or "scrolling"
     #[serde(default)]
     pub mode: LayoutMode,
+    /// Traditional (i3/sway-style) layout configuration
+    #[serde(default)]
+    pub traditional: TraditionalSettings,
     /// Stack system configuration
     #[serde(default)]
     pub stack: StackSettings,

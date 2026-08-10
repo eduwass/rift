@@ -412,9 +412,18 @@ impl LayoutEngine {
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
         self.layout_settings = settings.clone();
+        self.apply_layout_settings_to_systems(settings);
+    }
 
+    /// Push config-derived settings into every live layout system. Systems keep
+    /// these out of their persisted state, so this has to run on hot reload *and*
+    /// after loading a snapshot, or a restored workspace would run on defaults.
+    fn apply_layout_settings_to_systems(&mut self, settings: &LayoutSettings) {
         for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {
             match &mut ws.layout_system {
+                LayoutSystemKind::Traditional(system) => {
+                    system.update_settings(&settings.traditional);
+                }
                 LayoutSystemKind::Stack(system) => {
                     system.update_settings(settings.stack.default_orientation);
                 }
@@ -2451,6 +2460,7 @@ impl LayoutEngine {
         self.broadcast_tx = broadcast_tx;
         self.virtual_workspace_manager
             .rehydrate_after_load(virtual_workspace_config, layout_settings);
+        self.apply_layout_settings_to_systems(layout_settings);
     }
 
     pub fn save(&self, path: PathBuf) -> std::io::Result<()> {
