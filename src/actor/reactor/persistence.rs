@@ -799,7 +799,9 @@ impl Reactor {
         }
         self.persistence.adopt_pruned += stale.len() as u32;
         for wid in stale {
-            self.layout_manager.layout_engine.prune_window(wid);
+            self.layout_manager
+                .layout_engine
+                .prune_window(&mut self.state.windows, wid);
         }
         self.mark_layout_dirty();
         let _ = self.update_layout_or_warn(false, false);

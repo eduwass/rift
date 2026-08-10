@@ -2770,7 +2770,15 @@ fn it_ignores_windows_on_nonzero_layers() {
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     reactor.handle_event(space_state_event(vec![full_screen], vec![Some(SpaceId::new(1))]));
 
-    reactor.handle_events(apps.make_app_with_opts(1, make_windows(1), None, true, false));
+    // Layer > 0 windows (HUD / overlay chrome) must not be tiled.
+    let mut events = apps.make_app_with_opts(1, make_windows(1), None, true, true);
+    if let Event::ApplicationLaunched { window_server_info, .. } = &mut events[0] {
+        for info in window_server_info.iter_mut() {
+            info.layer = 3;
+            crate::sys::window_server::register_visible_window_override(*info);
+        }
+    }
+    reactor.handle_events(events);
 
     let state_before = apps.windows.clone();
     let _events = apps.simulate_events();
@@ -4749,22 +4757,6 @@ fn fullscreen_startup_discovery_preserves_existing_hidden_assignment_without_app
         Some(secondary_workspace),
         "fullscreen startup discovery must preserve the existing hidden assignment instead of defaulting it"
     );
-}
-
-// Helper: check whether any window owned by `pid` appears in the layout tree for `space`.
-fn has_window_in_layout(
-    reactor: &mut Reactor,
-    space: SpaceId,
-    screen: CGRect,
-    wid: WindowId,
-) -> bool {
-    let gaps = reactor.config.settings.layout.gaps.clone();
-    reactor
-        .layout_manager
-        .layout_engine
-        .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
-        .iter()
-        .any(|(layout_wid, _)| *layout_wid == wid)
 }
 
 #[test]

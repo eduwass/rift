@@ -1150,7 +1150,10 @@ impl LayoutEngine {
     /// Drop a window from every part of the engine. Used to evict restored windows
     /// that were never re-adopted (their app died or the window closed while rift
     /// was down), so pruned state is what the next save persists — no zombies.
-    pub fn prune_window(&mut self, wid: WindowId) {
+    ///
+    /// Workspace membership lives in `WindowStore`, so the store must be cleared
+    /// in the same call or `workspace_for_window_any` keeps reporting the zombie.
+    pub fn prune_window(&mut self, window_store: &mut WindowStore, wid: WindowId) {
         self.remove_window_from_all_tiling_trees(wid);
         self.remove_floating_position(wid);
         self.floating.remove_floating(wid);
@@ -1158,6 +1161,7 @@ impl LayoutEngine {
         if self.focused_window == Some(wid) {
             self.focused_window = None;
         }
+        self.virtual_workspace_manager.remove_window(window_store, wid);
     }
 
     fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {

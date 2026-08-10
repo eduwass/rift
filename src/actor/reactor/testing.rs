@@ -67,6 +67,22 @@ pub fn window_update_tuple(
     (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None)
 }
 
+/// Whether the space's tiled layout still hands screen space to `wid`.
+pub fn has_window_in_layout(
+    reactor: &mut Reactor,
+    space: SpaceId,
+    screen: CGRect,
+    wid: WindowId,
+) -> bool {
+    let gaps = reactor.config.settings.layout.gaps.clone();
+    reactor
+        .layout_manager
+        .layout_engine
+        .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
+        .into_iter()
+        .any(|(layout_wid, _)| layout_wid == wid)
+}
+
 /// Whether the space's tiled layout still hands screen space to any window of `pid`.
 /// Used by the orphan-reap tests, where the point is that a reaped window stops
 /// occupying a tile — not merely that it left the window store.
@@ -76,17 +92,11 @@ pub fn has_windows_in_layout(
     screen: CGRect,
     pid: pid_t,
 ) -> bool {
+    let gaps = reactor.config.settings.layout.gaps.clone();
     reactor
         .layout_manager
         .layout_engine
-        .calculate_layout(
-            space,
-            screen,
-            &Default::default(),
-            0.0,
-            Default::default(),
-            Default::default(),
-        )
+        .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
         .into_iter()
         .any(|(wid, _)| wid.pid == pid)
 }
