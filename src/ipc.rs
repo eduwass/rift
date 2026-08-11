@@ -477,12 +477,33 @@ unsafe extern "C" fn handle_mach_request_c(
     send_response(original_msg, &response);
 }
 
-fn send_response(original_msg: *mut mach_msg_header_t, response: &RiftResponse) {
+// A reply larger than the mach inline payload can't be delivered; sending nothing
+// leaves the client waiting (this hung every `rift-cli execute config get` for
+// seconds when the config JSON outgrew the old 16KB cap). Downgrade to a small,
+// explicit error so the client always gets an answer.
+fn encode_response_json(response: &RiftResponse, max_len: usize) -> Vec<u8> {
     let mut response_json = serde_json::to_vec(response).unwrap();
+
+    if response_json.len() + 1 > max_len {
+        let len = response_json.len();
+        error!("IPC response too large to send ({len} bytes; limit {max_len}); replying with error");
+        let fallback = RiftResponse::Error {
+            error: serde_json::json!({
+                "message": format!("response too large: {len} bytes exceeds the {max_len}-byte IPC limit")
+            }),
+        };
+        response_json = serde_json::to_vec(&fallback).unwrap();
+    }
 
     if response_json.last().copied() != Some(0) {
         response_json.push(0);
     }
+    response_json
+}
+
+fn send_response(original_msg: *mut mach_msg_header_t, response: &RiftResponse) {
+    let response_json =
+        encode_response_json(response, crate::sys::mach::MAX_MESSAGE_SIZE as usize);
 
     unsafe {
         if !send_mach_reply(
@@ -499,5 +520,39 @@ fn send_response(original_msg: *mut mach_msg_header_t, response: &RiftResponse) 
                 }
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_response_downgrades_to_error_instead_of_hanging() {
+        let big = RiftResponse::Success {
+            data: serde_json::json!("x".repeat(64 * 1024)),
+        };
+        let encoded = encode_response_json(&big, 16_384);
+        assert!(encoded.len() <= 16_384, "fallback must fit the limit");
+        assert_eq!(encoded.last().copied(), Some(0));
+        let parsed: RiftResponse =
+            serde_json::from_slice(&encoded[..encoded.len() - 1]).unwrap();
+        match parsed {
+            RiftResponse::Error { error } => {
+                assert!(error["message"].as_str().unwrap().contains("too large"));
+            }
+            _ => panic!("expected error response"),
+        }
+    }
+
+    #[test]
+    fn normal_response_passes_through_nul_terminated() {
+        let ok = RiftResponse::Success { data: serde_json::json!({"a": 1}) };
+        let encoded = encode_response_json(&ok, 16_384);
+        assert_eq!(encoded, {
+            let mut v = serde_json::to_vec(&ok).unwrap();
+            v.push(0);
+            v
+        });
     }
 }

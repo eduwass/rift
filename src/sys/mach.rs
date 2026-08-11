@@ -15,7 +15,15 @@ use std::vec::Vec;
 
 use tracing::{debug, error, info};
 
-const MAX_MESSAGE_SIZE: u32 = 16_384;
+// Inline payload cap for a single mach message. GetConfig responses grow with the
+// user's config (app_rules, per-display gaps) and already passed 16KB once, which
+// silently dropped every reply and hung clients — keep generous headroom here, and
+// keep the oversized-response fallback in ipc::send_response as the hard backstop.
+pub const MAX_MESSAGE_SIZE: u32 = 262_144;
+
+// How long a request/reply receive waits before giving up. Event subscription
+// receives (mach_receive_message_on_port) block indefinitely by design.
+const REPLY_TIMEOUT_MS: u32 = 15_000;
 const MACH_BS_NAME_FMT_PREFIX: &str = "git.";
 static G_NAME: &str = "acsandmann.rift";
 
@@ -234,6 +242,19 @@ struct mach_msg_ool_descriptor_t {
 
 const MACH_MSG_OOL_DESCRIPTOR: u32 = 1;
 const MACH_MSG_VIRTUAL_COPY: u8 = 1;
+
+// Message buffers are MAX_MESSAGE_SIZE-sized; allocate them zeroed on the heap so
+// they never live on a (possibly small, e.g. GCD worker) thread stack.
+fn boxed_zeroed<T>() -> Box<T> {
+    unsafe {
+        let layout = std::alloc::Layout::new::<T>();
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut T;
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        Box::from_raw(ptr)
+    }
+}
 
 #[repr(C)]
 struct mach_inline_message_t<const N: usize> {
@@ -738,15 +759,21 @@ unsafe fn receive_message_on_port(
     reply_port: mach_port_t,
     response_buf: &mut Vec<u8>,
     log_ctx: &str,
+    timeout_ms: u32, // 0 = block forever (event subscriptions)
 ) -> bool {
-    let mut buffer: mach_buffer_t = zeroed();
+    let mut buffer: Box<mach_buffer_t> = boxed_zeroed();
+    let (options, timeout) = if timeout_ms > 0 {
+        (MACH_RCV_MSG | MACH_RCV_TIMEOUT, timeout_ms)
+    } else {
+        (MACH_RCV_MSG, MACH_MSG_TIMEOUT_NONE)
+    };
     let recv_result = mach_msg(
         &mut buffer.message.header,
-        MACH_RCV_MSG,
+        options,
         0,
         size_of::<mach_buffer_t>() as u32,
         reply_port,
-        MACH_MSG_TIMEOUT_NONE,
+        timeout,
         0,
     );
 
@@ -832,7 +859,7 @@ pub unsafe fn mach_send_message(
 
     let aligned_len = (len + 3) & !3;
 
-    let mut sm: mach_message_t = zeroed();
+    let mut sm: Box<mach_message_t> = boxed_zeroed();
     sm.header.msgh_remote_port = port;
     sm.header.msgh_local_port = if await_response { reply_port } else { 0 };
     sm.header.msgh_voucher_port = 0;
@@ -877,7 +904,7 @@ pub unsafe fn mach_send_message(
 
     if await_response {
         let received = if let Some(buf) = response_buf {
-            receive_message_on_port(reply_port, buf, "mach_send_message")
+            receive_message_on_port(reply_port, buf, "mach_send_message", REPLY_TIMEOUT_MS)
         } else {
             false
         };
@@ -903,7 +930,7 @@ pub unsafe fn mach_try_send_message(port: mach_port_t, message: *const c_char, l
 
     let aligned_len = (len + 3) & !3;
 
-    let mut sm: mach_message_t = zeroed();
+    let mut sm: Box<mach_message_t> = boxed_zeroed();
     sm.header.msgh_remote_port = port;
     sm.header.msgh_local_port = 0;
     sm.header.msgh_voucher_port = 0;
@@ -955,7 +982,7 @@ pub unsafe fn mach_send_message_with_reply_port(
 
     let aligned_len = (len + 3) & !3;
 
-    let mut sm: mach_message_t = zeroed();
+    let mut sm: Box<mach_message_t> = boxed_zeroed();
     sm.header.msgh_remote_port = port;
     sm.header.msgh_local_port = reply_port;
     sm.header.msgh_voucher_port = 0;
@@ -987,7 +1014,12 @@ pub unsafe fn mach_send_message_with_reply_port(
         return false;
     }
 
-    receive_message_on_port(reply_port, response_buf, "mach_send_message_with_reply_port")
+    receive_message_on_port(
+        reply_port,
+        response_buf,
+        "mach_send_message_with_reply_port",
+        REPLY_TIMEOUT_MS,
+    )
 }
 
 pub unsafe fn mach_send_request(
@@ -1077,7 +1109,7 @@ pub unsafe fn mach_receive_message_on_port(
         error!("mach_receive_message_on_port: invalid reply_port=0");
         return false;
     }
-    receive_message_on_port(reply_port, response_buf, "mach_receive_message_on_port")
+    receive_message_on_port(reply_port, response_buf, "mach_receive_message_on_port", 0)
 }
 
 pub type mach_handler = unsafe extern "C" fn(
@@ -1310,7 +1342,7 @@ pub unsafe fn send_mach_reply(
         return false;
     };
 
-    let mut reply: mach_message_t = zeroed();
+    let mut reply: Box<mach_message_t> = boxed_zeroed();
 
     let aligned_len = (response_len + 3) & !3;
     let total_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
