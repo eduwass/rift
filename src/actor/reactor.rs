@@ -2328,7 +2328,7 @@ impl Reactor {
                 .restore_cursor_position_per_workspace
                 .then(|| self.restored_cursor_for_workspace_window(wid))
                 .flatten();
-            if let Some(target) = restored_cursor.or_else(|| self.window_center_on_known_screen(wid))
+            if let Some(target) = restored_cursor.or_else(|| self.window_warp_point_on_known_screen(wid))
             {
                 self.warp_mouse(target);
             }
@@ -2346,7 +2346,7 @@ impl Reactor {
                 None => true,
             };
             if settled || std::time::Instant::now() >= deadline {
-                if let Some(target) = self.window_center_on_known_screen(wid)
+                if let Some(target) = self.window_warp_point_on_known_screen(wid)
                     && let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref()
                 {
                     event_tap_tx.send(crate::actor::event_tap::Request::WarpSilent(target));
@@ -3476,9 +3476,37 @@ impl Reactor {
         self.state.windows.is_window_server_id_native_fullscreen_suspended(wsid)
     }
 
-    fn window_center_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {
-        let window_center = self.state.windows.window(wid)?.frame_monotonic.mid();
-        self.screen_for_point(window_center).map(|_| window_center)
+    /// Warp target for mouse warps: a point on a *visible* part of the window.
+    /// A tiled window can have floating windows resting on top of it; warping
+    /// to `frame.mid()` can park the cursor on such a float, and the next real
+    /// mouse move lets focus-follows-mouse steal focus straight back to the
+    /// float. With no overlapping floats this is exactly the frame center.
+    fn window_warp_point_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {
+        let frame = self.state.windows.window(wid)?.frame_monotonic;
+        let point = if self.layout_manager.layout_engine.is_window_floating(wid) {
+            // A focused float is raised topmost, so its center is visible.
+            frame.mid()
+        } else {
+            let occluders: Vec<CGRect> = self
+                .best_space_for_window_id(wid)
+                .map(|space| {
+                    self.layout_manager
+                        .layout_engine
+                        .windows_in_active_workspace(&self.state.windows, space)
+                        .into_iter()
+                        .filter(|&other| {
+                            other != wid
+                                && self.layout_manager.layout_engine.is_window_floating(other)
+                        })
+                        .filter_map(|other| {
+                            Some(self.state.windows.window(other)?.frame_monotonic)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            crate::sys::geometry::visible_warp_point(frame, &occluders)
+        };
+        self.screen_for_point(point).map(|_| point)
     }
 
     fn schedule_display_move_reasserts(&self, window_id: WindowId) {
@@ -4606,7 +4634,7 @@ impl Reactor {
         }
         let focus_window_with_warp = focus_window.map(|wid| {
             let warp = if force_focus_warp {
-                self.window_center_on_known_screen(wid)
+                self.window_warp_point_on_known_screen(wid)
             } else if self.config.settings.mouse_follows_focus {
                 if self.workspace_switch_manager.workspace_switch_state
                     == WorkspaceSwitchState::Active
@@ -4615,7 +4643,7 @@ impl Reactor {
                     self.workspace_switch_manager.pending_workspace_mouse_warp = Some(wid);
                     None
                 } else {
-                    self.window_center_on_known_screen(wid)
+                    self.window_warp_point_on_known_screen(wid)
                 }
             } else {
                 None

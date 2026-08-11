@@ -108,6 +108,52 @@ impl CGRectExt for ic::CGRect {
     fn area(&self) -> f64 { self.size.width * self.size.height }
 }
 
+/// A point inside `frame` on a visible (unoccluded) part of the window, for
+/// mouse warps. With no intersecting occluder this is exactly `frame.mid()`;
+/// when floats cover parts of the frame it is the sampled point deepest inside
+/// the uncovered region (farthest from every occluder and from the frame edge);
+/// if the frame is fully covered it falls back to `frame.mid()`.
+pub fn visible_warp_point(frame: ic::CGRect, occluders: &[ic::CGRect]) -> ic::CGPoint {
+    let occluders: Vec<ic::CGRect> =
+        occluders.iter().filter(|o| frame.intersection(o).area() > 0.0).copied().collect();
+    if occluders.is_empty() {
+        return frame.mid();
+    }
+    // ponytail: coarse pole-of-inaccessibility over an NxN sample grid — the
+    // occluder set is at most a handful of floating windows, so N*N*len is
+    // trivial. Ceiling: ~frame/N point granularity; upgrade path is exact
+    // rectangle subtraction if warp placement ever needs to be finer.
+    const N: usize = 24;
+    let dist_to_rect = |r: &ic::CGRect, p: ic::CGPoint| -> f64 {
+        let dx = (r.min().x - p.x).max(p.x - r.max().x).max(0.0);
+        let dy = (r.min().y - p.y).max(p.y - r.max().y).max(0.0);
+        (dx * dx + dy * dy).sqrt()
+    };
+    let mut best: Option<(f64, ic::CGPoint)> = None;
+    for i in 0..N {
+        for j in 0..N {
+            let p = ic::CGPoint::new(
+                frame.min().x + (i as f64 + 0.5) / N as f64 * frame.size.width,
+                frame.min().y + (j as f64 + 0.5) / N as f64 * frame.size.height,
+            );
+            if occluders.iter().any(|o| o.contains(p)) {
+                continue;
+            }
+            let edge = (p.x - frame.min().x)
+                .min(frame.max().x - p.x)
+                .min(p.y - frame.min().y)
+                .min(frame.max().y - p.y);
+            let clear =
+                occluders.iter().map(|o| dist_to_rect(o, p)).fold(f64::INFINITY, f64::min);
+            let score = edge.min(clear);
+            if best.is_none_or(|(s, _)| score > s) {
+                best = Some((score, p));
+            }
+        }
+    }
+    best.map(|(_, p)| p).unwrap_or_else(|| frame.mid())
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "ic::CGRect")]
 pub struct CGRectDef {
@@ -142,5 +188,57 @@ impl<'de> DeserializeAs<'de, ic::CGRect> for CGRectDef {
     fn deserialize_as<D>(deserializer: D) -> Result<ic::CGRect, D::Error>
     where D: Deserializer<'de> {
         CGRectDef::deserialize(deserializer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> ic::CGRect {
+        ic::CGRect {
+            origin: ic::CGPoint::new(x, y),
+            size: ic::CGSize::new(w, h),
+        }
+    }
+
+    #[test]
+    fn no_occluders_is_exactly_center() {
+        let frame = rect(100.0, 100.0, 400.0, 300.0);
+        assert_eq!(visible_warp_point(frame, &[]), frame.mid());
+    }
+
+    #[test]
+    fn non_intersecting_occluder_is_exactly_center() {
+        let frame = rect(0.0, 0.0, 200.0, 200.0);
+        assert_eq!(visible_warp_point(frame, &[rect(300.0, 0.0, 100.0, 100.0)]), frame.mid());
+    }
+
+    #[test]
+    fn occluded_center_moves_point_to_visible_region() {
+        let frame = rect(0.0, 0.0, 400.0, 300.0);
+        // float covering the center and the whole left half
+        let float = rect(-50.0, -50.0, 350.0, 400.0);
+        let p = visible_warp_point(frame, &[float]);
+        assert!(frame.contains(p), "point must stay inside the frame: {p:?}");
+        assert!(!float.contains(p), "point must not land on the occluder: {p:?}");
+        // visible strip is x in (300, 400); the deepest point is around x=350
+        assert!(p.x > 300.0, "expected point in the visible strip, got {p:?}");
+    }
+
+    #[test]
+    fn multiple_occluders_picks_clearest_gap() {
+        let frame = rect(0.0, 0.0, 400.0, 400.0);
+        let occ = [rect(0.0, 0.0, 400.0, 180.0), rect(0.0, 220.0, 400.0, 180.0)];
+        let p = visible_warp_point(frame, &occ);
+        assert!(!occ[0].contains(p) && !occ[1].contains(p), "landed on an occluder: {p:?}");
+        assert!((p.y - 200.0).abs() < 20.0, "expected the horizontal gap, got {p:?}");
+    }
+
+    #[test]
+    fn fully_covered_falls_back_to_center() {
+        let frame = rect(0.0, 0.0, 200.0, 200.0);
+        let p = visible_warp_point(frame, &[rect(-10.0, -10.0, 220.0, 220.0)]);
+        assert_eq!(p, frame.mid());
     }
 }
