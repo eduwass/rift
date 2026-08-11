@@ -4670,6 +4670,15 @@ impl Reactor {
             return;
         }
 
+        // Drag-to-swap trades two windows' tiles. A floating window has no tile, so
+        // treating it as a drag source swapped it INTO the tile it was dragged over and
+        // snapped it out from under the cursor on mouse-up. Candidates already exclude
+        // floats (see collect_drag_swap_candidates); the source needs the same rule.
+        if self.layout_manager.layout_engine.is_window_floating(wid) {
+            trace!(?wid, "Skipping swap: dragged window is floating");
+            return;
+        }
+
         let server_id = {
             let Some(window) = self.state.windows.window(wid) else {
                 return;
