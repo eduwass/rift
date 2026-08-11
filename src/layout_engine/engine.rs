@@ -2472,6 +2472,11 @@ impl LayoutEngine {
     ) {
         self.layout_settings = layout_settings.clone();
         self.broadcast_tx = broadcast_tx;
+        // `app_rules` is #[serde(skip)], so a restored engine deserializes it empty and
+        // every floating/manage rule silently stops applying until something triggers a
+        // config reload. That was masked for a long time by run_on_start rewriting the
+        // config (apply-gaps) and tripping hot_reload a moment after launch.
+        self.app_rules = AppRuleEngine::new(&virtual_workspace_config.app_rules);
         self.virtual_workspace_manager
             .rehydrate_after_load(virtual_workspace_config, layout_settings);
         self.apply_layout_settings_to_systems(layout_settings);
@@ -4496,6 +4501,52 @@ mod tests {
         assert_eq!(
             mapping_before, mapping_after,
             "window->workspace mapping survives the roundtrip"
+        );
+    }
+
+    #[test]
+    fn restored_engine_still_applies_app_rules() {
+        // Regression: `app_rules` is #[serde(skip)], so a snapshot-restored engine came
+        // back with an empty rule set and every floating/manage rule stopped applying
+        // until an unrelated config reload rebuilt it. In practice that meant apps that
+        // are supposed to float (Finder, Spotify, Raycast) tiled after every restart.
+        let mut vw_settings = VirtualWorkspaceSettings::default();
+        vw_settings.app_rules = vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.apple.finder".to_string()),
+            workspace: None,
+            floating: true,
+            manage: true,
+            app_name: None,
+            title_regex: None,
+            title_substring: None,
+            ax_role: None,
+            ax_subrole: None,
+        }];
+
+        let engine = LayoutEngine::new(&vw_settings, &LayoutSettings::default(), None);
+        let context = crate::model::app_rules::WindowRuleContext {
+            app_bundle_id: Some("com.apple.finder"),
+            app_name: Some("Finder"),
+            window_title: None,
+            ax_role: None,
+            ax_subrole: None,
+        };
+        let fresh = engine.app_rules.evaluate(context);
+        assert_ne!(
+            fresh,
+            crate::model::app_rules::AppRuleDecision::NoMatch,
+            "a freshly built engine must match the floating rule"
+        );
+
+        let serialized = engine.serialize_to_string();
+        let restored =
+            LayoutEngine::deserialize_from_str(&serialized, &vw_settings, &LayoutSettings::default())
+                .expect("engine should deserialize");
+
+        assert_eq!(
+            restored.app_rules.evaluate(context),
+            fresh,
+            "a restored engine must evaluate app rules exactly like a fresh one"
         );
     }
 
