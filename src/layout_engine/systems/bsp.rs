@@ -1790,10 +1790,30 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn rebalance(&mut self, _layout: LayoutId) {}
+    fn rebalance(&mut self, layout: LayoutId) {
+        let Some(state) = self.layouts.get(layout).copied() else { return };
+        let nodes: Vec<_> = state.root.traverse_preorder(&self.tree.map).collect();
+        for node in nodes {
+            if let Some(NodeKind::Split { ratio, .. }) = self.kind.get_mut(node) {
+                *ratio = 0.5;
+            }
+        }
+    }
 
     fn balance_sizes(&mut self, layout: LayoutId) {
         self.rebalance(layout)
+    }
+
+    fn balance_sizes_weighted(&mut self, layout: LayoutId, ratio: f64) {
+        let selection = self.selection_of_layout(layout);
+        self.rebalance(layout);
+        let Some(node) = selection else { return };
+        let Some(parent) = node.parent(&self.tree.map) else { return };
+        let selected_is_first = parent.first_child(&self.tree.map) == Some(node);
+        if let Some(NodeKind::Split { ratio: split_ratio, .. }) = self.kind.get_mut(parent) {
+            let ratio = ratio.clamp(0.05, 0.95) as f32;
+            *split_ratio = if selected_is_first { ratio } else { 1.0 - ratio };
+        }
     }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
@@ -1827,6 +1847,64 @@ impl LayoutSystem for BspLayoutSystem {
                     Orientation::Horizontal => Orientation::Vertical,
                     Orientation::Vertical => Orientation::Horizontal,
                 };
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+
+    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    #[test]
+    fn balance_resets_all_split_ratios_without_rebuilding_tree() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        for idx in 1..=4 {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        let root = system.layouts[layout].root;
+        let nodes_before: Vec<_> = root.traverse_preorder(&system.tree.map).collect();
+        for node in &nodes_before {
+            if let Some(NodeKind::Split { ratio, .. }) = system.kind.get_mut(*node) {
+                *ratio = 0.8;
+            }
+        }
+
+        system.balance_sizes(layout);
+
+        assert_eq!(nodes_before, root.traverse_preorder(&system.tree.map).collect::<Vec<_>>());
+        for node in nodes_before {
+            if let Some(NodeKind::Split { ratio, .. }) = system.kind.get(node) {
+                assert!((*ratio - 0.5).abs() < 0.0001);
+            }
+        }
+    }
+
+    #[test]
+    fn weighted_balance_only_changes_the_selected_immediate_split() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        for idx in 1..=3 {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        let selected = system.selection_of_layout(layout).expect("selection");
+        let parent = selected.parent(&system.tree.map).expect("selected split");
+
+        system.balance_sizes_weighted(layout, 0.66);
+
+        let selected_is_first = parent.first_child(&system.tree.map) == Some(selected);
+        let expected = if selected_is_first { 0.66 } else { 0.34 };
+        let Some(NodeKind::Split { ratio, .. }) = system.kind.get(parent) else {
+            panic!("selected parent should remain a split");
+        };
+        assert!((*ratio - expected).abs() < 0.0001);
+        let root = system.layouts[layout].root;
+        for node in root.traverse_preorder(&system.tree.map).filter(|node| *node != parent) {
+            if let Some(NodeKind::Split { ratio, .. }) = system.kind.get(node) {
+                assert!((*ratio - 0.5).abs() < 0.0001);
             }
         }
     }

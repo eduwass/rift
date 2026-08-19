@@ -179,9 +179,9 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64);
     fn rebalance(&mut self, layout: LayoutId);
     fn balance_sizes(&mut self, layout: LayoutId);
-    /// Like `balance_sizes`, but the selected window ends at `ratio` of the axis
-    /// and the others share the remainder evenly. Systems without weighted
-    /// support fall back to a plain balance.
+    /// Like `balance_sizes`, but the selected window ends at `ratio` within its
+    /// immediate split and its siblings share the remainder evenly. Systems
+    /// without weighted support fall back to a plain balance.
     fn balance_sizes_weighted(&mut self, layout: LayoutId, _ratio: f64) {
         self.balance_sizes(layout);
     }

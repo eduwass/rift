@@ -899,7 +899,16 @@ impl LayoutSystem for MasterStackLayoutSystem {
     fn rebalance(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
 
     fn balance_sizes(&mut self, layout: LayoutId) {
-        self.rebalance(layout)
+        self.normalize_layout(layout);
+        self.inner.rebalance(layout);
+        self.normalize_layout(layout);
+    }
+
+    fn balance_sizes_weighted(&mut self, layout: LayoutId, ratio: f64) {
+        self.balance_sizes(layout);
+        self.inner.balance_sizes_weighted(layout, ratio);
+        let (root, master, stack) = self.ensure_structure(layout);
+        self.apply_master_ratio(root, master, stack);
     }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
@@ -933,6 +942,30 @@ mod tests {
         // When w2 is added: master=[w2], stack=[w1]
         // When w3 is added: master=[w3], stack=[w2, w1] (since w2 was at index 0 and got pushed to stack, w1 was pushed next)
         assert_eq!(windows, vec![w(3), w(2), w(1)]);
+    }
+
+    #[test]
+    fn balance_keeps_master_ratio_and_balances_each_container() {
+        let mut settings = MasterStackSettings::default();
+        settings.master_ratio = 0.6;
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+        for idx in 1..=4 {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        let (root, master, stack) = system.ensure_structure(layout);
+        let stack_children: Vec<_> = stack.children(system.inner.map()).collect();
+        system.inner.tree.data.layout.info[stack_children[0]].size = 4.0;
+        system.inner.tree.data.layout.info[stack_children[1]].size = 1.0;
+
+        system.balance_sizes(layout);
+
+        assert!((system.inner.tree.data.layout.info[master].size - 1.2).abs() < 0.0001);
+        assert!((system.inner.tree.data.layout.info[stack].size - 0.8).abs() < 0.0001);
+        assert!((system.inner.tree.data.layout.info[root].total - 2.0).abs() < 0.0001);
+        for child in stack.children(system.inner.map()) {
+            assert!((system.inner.tree.data.layout.info[child].size - 1.0).abs() < 0.0001);
+        }
     }
 
     #[test]

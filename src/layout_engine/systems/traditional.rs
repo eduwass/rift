@@ -1194,51 +1194,23 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn balance_sizes(&mut self, layout: LayoutId) {
-        let windows = self.visible_windows_in_layout(layout);
-        if windows.len() < 2 {
-            return;
-        }
-
-        let selected = self.selected_window(layout);
-        for wid in &windows {
-            self.remove_window(*wid);
-        }
-
-        let root = self.root(layout);
-        self.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
-        for wid in windows {
-            self.add_window_under(layout, root, wid);
-        }
-        // Keep the previously selected window selected across the rebuild
-        // (falling back to the first child) so a follow-up selection-relative
-        // command — e.g. cycling rebalance → rebalance-focus — targets the
-        // window the user is actually on, not the leftmost one.
-        let reselect = selected
-            .and_then(|wid| self.tree.data.window.node_for(layout, wid))
-            .or_else(|| root.first_child(self.map()));
-        if let Some(node) = reselect {
-            self.select(node);
-        }
         self.rebalance(layout);
     }
 
     fn balance_sizes_weighted(&mut self, layout: LayoutId, ratio: f64) {
-        let n = self.visible_windows_in_layout(layout).len();
-        if n < 2 {
-            return;
-        }
-        // Capture the selection before balance_sizes rebuilds the tree (it
-        // re-selects the first child), then weight the focused column so it
-        // lands at `ratio` while the equal-weighted others share the rest.
         let focused = self.selected_window(layout);
         self.balance_sizes(layout);
         let Some(focused) = focused else { return };
         let Some(node) = self.tree.data.window.node_for(layout, focused) else { return };
+        let Some(parent) = node.parent(self.map()) else { return };
+        let n = parent.children(self.map()).count();
+        if n < 2 {
+            return;
+        }
         let ratio = ratio.clamp(0.05, 0.9);
         let weight = (ratio * (n as f64 - 1.0) / (1.0 - ratio)) as f32;
         self.tree.data.layout.info[node].size = weight;
-        let root = self.root(layout);
-        self.tree.data.layout.info[root].total = weight + (n as f32 - 1.0);
+        self.tree.data.layout.info[parent].total = weight + (n as f32 - 1.0);
         self.select(node);
     }
 
@@ -3987,6 +3959,73 @@ mod tests {
         assert!((system.tree.data.layout.info[n2].size - 1.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[n3].size - 1.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[root].total - 3.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn balance_sizes_preserves_mixed_split_topology() {
+        let mut system = TraditionalLayoutSystem::new(&TraditionalSettings {
+            even_sizes: true,
+            ..Default::default()
+        });
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let left = system.add_window_under(layout, root, w(173));
+        let right_column = system.tree.mk_node().push_back(root);
+        system.tree.data.layout.set_kind(right_column, LayoutKind::Vertical);
+        let top = system.add_window_under(layout, right_column, w(174));
+        let bottom = system.add_window_under(layout, right_column, w(175));
+        system.tree.data.layout.info[left].size = 3.0;
+        system.tree.data.layout.info[right_column].size = 1.0;
+        system.tree.data.layout.info[root].total = 4.0;
+        system.tree.data.layout.info[top].size = 1.0;
+        system.tree.data.layout.info[bottom].size = 4.0;
+        system.tree.data.layout.info[right_column].total = 5.0;
+
+        system.balance_sizes(layout);
+
+        assert_eq!(system.layout(root), LayoutKind::Horizontal);
+        assert_eq!(system.layout(right_column), LayoutKind::Vertical);
+        assert_eq!(left.parent(system.map()), Some(root));
+        assert_eq!(top.parent(system.map()), Some(right_column));
+        assert_eq!(bottom.parent(system.map()), Some(right_column));
+        for node in [left, right_column, top, bottom] {
+            assert!((system.tree.data.layout.info[node].size - 1.0).abs() < 0.0001);
+        }
+        assert!((system.tree.data.layout.info[root].total - 2.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[right_column].total - 2.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn weighted_balance_only_emphasizes_focused_immediate_split() {
+        let mut system = TraditionalLayoutSystem::new(&TraditionalSettings {
+            even_sizes: true,
+            ..Default::default()
+        });
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let left = system.add_window_under(layout, root, w(181));
+        let right_column = system.tree.mk_node().push_back(root);
+        system.tree.data.layout.set_kind(right_column, LayoutKind::Vertical);
+        let top = system.add_window_under(layout, right_column, w(182));
+        let bottom = system.add_window_under(layout, right_column, w(183));
+        system.select(bottom);
+
+        system.balance_sizes_weighted(layout, 0.66);
+
+        assert!((system.tree.data.layout.info[left].size - 1.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[right_column].size - 1.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[root].total - 2.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[top].size - 1.0).abs() < 0.0001);
+        let bottom_weight = 0.66 / 0.34;
+        assert!((system.tree.data.layout.info[bottom].size - bottom_weight).abs() < 0.0001);
+        assert!(
+            (system.tree.data.layout.info[right_column].total - (1.0 + bottom_weight)).abs()
+                < 0.0001
+        );
     }
 
     #[test]

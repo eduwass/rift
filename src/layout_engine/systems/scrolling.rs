@@ -1617,10 +1617,44 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
-    fn rebalance(&mut self, _layout: LayoutId) {}
+    fn rebalance(&mut self, layout: LayoutId) {
+        let Some(state) = self.layout_state_mut(layout) else { return };
+        for column in &mut state.columns {
+            column.ensure_height_weights();
+            column.width_offset = 0.0;
+            column.height_weights.fill(1.0);
+        }
+    }
 
     fn balance_sizes(&mut self, layout: LayoutId) {
         self.rebalance(layout)
+    }
+
+    fn balance_sizes_weighted(&mut self, layout: LayoutId, ratio: f64) {
+        self.rebalance(layout);
+        let min_ratio = self.settings.min_column_width_ratio;
+        let max_ratio = self.settings.max_column_width_ratio;
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
+        let Some(state) = self.layout_state_mut(layout) else { return };
+        let Some((col_idx, row_idx)) = state.selected_location() else { return };
+        let base_ratio = state.column_width_ratio;
+        let column = &mut state.columns[col_idx];
+        if column.windows.len() > 1 {
+            let ratio = ratio.clamp(0.05, 0.95);
+            let weight = ratio * (column.windows.len() as f64 - 1.0) / (1.0 - ratio);
+            column.height_weights[row_idx] = weight;
+        } else {
+            let ratio = ratio.clamp(min_ratio, max_ratio).max(0.05);
+            column.width_offset = ratio - base_ratio;
+        }
+        if niri_navigation {
+            state.reveal_selected_without_direction();
+        } else {
+            state.align_scroll_to_selected();
+        }
     }
 
     fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
@@ -1687,6 +1721,57 @@ mod tests {
                 .scroll_offset_px
                 .load(Ordering::Relaxed),
         )
+    }
+
+    #[test]
+    fn balance_clears_column_and_row_size_overrides() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let state = system.layouts.get_mut(layout).expect("layout");
+        state.columns = vec![
+            Column {
+                windows: vec![wid(1, 1), wid(1, 2)],
+                width_offset: 0.2,
+                height_weights: vec![3.0, 1.0],
+            },
+            Column {
+                windows: vec![wid(1, 3)],
+                width_offset: -0.1,
+                height_weights: vec![2.0],
+            },
+        ];
+
+        system.balance_sizes(layout);
+
+        let state = system.layouts.get(layout).expect("layout");
+        assert!(state.columns.iter().all(|column| column.width_offset == 0.0));
+        assert!(
+            state
+                .columns
+                .iter()
+                .all(|column| column.height_weights.iter().all(|weight| *weight == 1.0))
+        );
+    }
+
+    #[test]
+    fn weighted_balance_prefers_the_selected_row_in_a_split_column() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let selected = wid(1, 2);
+        let state = system.layouts.get_mut(layout).expect("layout");
+        state.columns = vec![Column {
+            windows: vec![wid(1, 1), selected],
+            width_offset: 0.2,
+            height_weights: vec![3.0, 1.0],
+        }];
+        state.selected = Some(selected);
+
+        system.balance_sizes_weighted(layout, 0.66);
+
+        let column = &system.layouts[layout].columns[0];
+        assert_eq!(column.width_offset, 0.0);
+        assert_eq!(column.height_weights[0], 1.0);
+        assert!((column.height_weights[1] - 0.66 / 0.34).abs() < 0.0001);
     }
 
     fn setup_two_windows(
