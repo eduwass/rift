@@ -5817,3 +5817,139 @@ mod tests {
         assert_eq!(before, after);
     }
 }
+
+#[cfg(test)]
+mod drag_resize_repro {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    use super::*;
+    use crate::layout_engine::LayoutKind;
+
+    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    fn frames(
+        system: &TraditionalLayoutSystem,
+        layout: LayoutId,
+        screen: CGRect,
+    ) -> Vec<(WindowId, CGRect)> {
+        let gaps = crate::common::config::GapSettings::default();
+        system.calculate_layout_for_node(
+            system.root(layout),
+            screen,
+            screen,
+            0.0,
+            &HashMap::default(),
+            &gaps,
+            0.0,
+            crate::common::config::HorizontalPlacement::Top,
+            crate::common::config::VerticalPlacement::Left,
+        )
+    }
+
+    fn frame_of(frames: &[(WindowId, CGRect)], wid: WindowId) -> CGRect {
+        frames.iter().find(|(id, _)| *id == wid).map(|(_, f)| *f).unwrap()
+    }
+
+    /// Rebuild the real workspace-1 shape: H[ w1, V[w2,w4], V[w3,w5] ]
+    /// with the user's settings (even_sizes, max_columns=3).
+    fn workspace1() -> (TraditionalLayoutSystem, LayoutId, CGRect) {
+        let mut system = TraditionalLayoutSystem::new(&TraditionalSettings {
+            even_sizes: true,
+            max_columns: 3,
+        });
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        for idx in 1..=3 {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        system.select_window(layout, w(2));
+        system.add_window_after_selection(layout, w(4));
+        system.select_window(layout, w(3));
+        system.add_window_after_selection(layout, w(5));
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3072.0, 1296.0));
+        (system, layout, screen)
+    }
+
+    #[test]
+    fn drag_col2_col3_divider_moves_adjacent_column() {
+        let (mut system, layout, screen) = workspace1();
+        let before = frames(&system, layout, screen);
+        let f4 = frame_of(&before, w(4));
+        let col3_left_before = frame_of(&before, w(3)).min().x;
+
+        let gaps = crate::common::config::GapSettings::default();
+        let mut cur = f4;
+        for _ in 0..6 {
+            let mut next = cur;
+            next.size.width += 10.0;
+            system.on_window_resized(layout, w(4), cur, next, screen, &gaps);
+            cur = next;
+        }
+
+        let after = frames(&system, layout, screen);
+        let col3_left_after = frame_of(&after, w(3)).min().x;
+        let w5_left_after = frame_of(&after, w(5)).min().x;
+        assert!(
+            (col3_left_after - (col3_left_before + 60.0)).abs() < 2.0,
+            "w3 (col3 top) should shift right by the drag delta: before={col3_left_before} after={col3_left_after}"
+        );
+        assert!(
+            (w5_left_after - (col3_left_before + 60.0)).abs() < 2.0,
+            "w5 (col3 bottom) should shift right too: after={w5_left_after}"
+        );
+    }
+
+    #[test]
+    fn drag_inner_divider_resizes_stacked_sibling() {
+        let (mut system, layout, screen) = workspace1();
+        let before = frames(&system, layout, screen);
+        let f2 = frame_of(&before, w(2));
+        let w4_top_before = frame_of(&before, w(4)).min().y;
+
+        let gaps = crate::common::config::GapSettings::default();
+        let mut cur = f2;
+        for _ in 0..6 {
+            let mut next = cur;
+            next.size.height += 10.0;
+            system.on_window_resized(layout, w(2), cur, next, screen, &gaps);
+            cur = next;
+        }
+
+        let after = frames(&system, layout, screen);
+        let w4_top_after = frame_of(&after, w(4)).min().y;
+        let w4_bottom_after = frame_of(&after, w(4)).max().y;
+        assert!(
+            (w4_top_after - (w4_top_before + 60.0)).abs() < 2.0,
+            "w4 should give up height: before_top={w4_top_before} after_top={w4_top_after}"
+        );
+        assert!(
+            (w4_bottom_after - screen.max().y).abs() < 2.0,
+            "w4 bottom should stay pinned"
+        );
+    }
+
+    #[test]
+    fn drag_top_window_right_edge_resizes_next_column() {
+        let (mut system, layout, screen) = workspace1();
+        let before = frames(&system, layout, screen);
+        let f2 = frame_of(&before, w(2));
+        let col3_left_before = frame_of(&before, w(3)).min().x;
+
+        let gaps = crate::common::config::GapSettings::default();
+        let mut cur = f2;
+        for _ in 0..6 {
+            let mut next = cur;
+            next.size.width += 10.0;
+            system.on_window_resized(layout, w(2), cur, next, screen, &gaps);
+            cur = next;
+        }
+
+        let after = frames(&system, layout, screen);
+        let col3_left_after = frame_of(&after, w(3)).min().x;
+        assert!(
+            (col3_left_after - (col3_left_before + 60.0)).abs() < 2.0,
+            "col3 should shift right: before={col3_left_before} after={col3_left_after}"
+        );
+    }
+}

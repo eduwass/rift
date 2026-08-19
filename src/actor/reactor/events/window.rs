@@ -10,7 +10,7 @@ use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::event::MouseState;
-use crate::sys::geometry::SameAs;
+use crate::sys::geometry::{IsWithin, SameAs};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerInfo;
 
@@ -270,7 +270,11 @@ pub fn handle_window_frame_changed(
         .unwrap_or_default();
     let mut has_pending = pending_target.is_some();
     let mut triggered_by_rift = has_pending && last_seen.is_some_and(|seen| seen == last_sent);
-    if mouse_state == Some(MouseState::Down) && triggered_by_rift {
+    // A frame change while the button is physically down is a user drag: never
+    // classify it as our own echo or drop it on a txid mismatch. A stale pending
+    // target (app settled off-target, so the ack never cleared it) would otherwise
+    // swallow every drag event for this window.
+    if mouse_state == Some(MouseState::Down) && has_pending {
         if let Some((server, _)) = pending_target {
             transactions.clear_target_for_window(server);
         }
@@ -278,15 +282,32 @@ pub fn handle_window_frame_changed(
         triggered_by_rift = false;
     }
     if has_pending && last_seen.is_some_and(|seen| seen != last_sent) {
+        debug!(
+            ?wid,
+            ?new_frame,
+            ?last_seen,
+            ?last_sent,
+            "Dropping frame change: pending target with mismatched txid"
+        );
         return Ok(outcome);
     }
     if triggered_by_rift {
         if let Some((server, target)) = pending_target {
-            if new_frame.same_as(target) {
+            // Apps often settle slightly off the requested frame (terminal cell
+            // snapping, min-size clamps); a strict same_as here left the target
+            // pending forever, poisoning later events for this window.
+            if new_frame.is_within(2.0, target) {
                 transactions.clear_target_for_window(server);
                 if let Some(window) = state.windows.window_mut(wid) {
                     window.frame_monotonic = new_frame;
                 }
+            } else {
+                debug!(
+                    ?wid,
+                    ?new_frame,
+                    ?target,
+                    "Rift-triggered frame change settled off-target; keeping pending target"
+                );
             }
         }
         return Ok(outcome);
