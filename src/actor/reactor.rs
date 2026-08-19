@@ -2132,8 +2132,26 @@ impl Reactor {
                     .window(window)
                     .is_some_and(|state| state.matches_filter(WindowFilter::EffectivelyManageable))
                 {
-                    self.send_layout_event(LayoutEvent::WindowAdded(space, window));
-                    self.send_layout_event(LayoutEvent::WindowFocused(space, window));
+                    // spawn_in_focused_workspace: apps that restore their previous
+                    // frame (e.g. editors) can materialize a new window on a
+                    // different display than the one the user is on; the window
+                    // would join that display's active workspace and focus would
+                    // yank the user over. Redirect newly created tiled windows to
+                    // the active workspace of the user's current display instead
+                    // (floating windows keep their frame, so they stay put).
+                    let spawn_space = if self.config.virtual_workspaces.spawn_in_focused_workspace
+                        && !self.layout_manager.layout_engine.is_window_floating(window)
+                    {
+                        self.workspace_command_space().unwrap_or(space)
+                    } else {
+                        space
+                    };
+                    if spawn_space != space {
+                        self.reassign_window_to_authoritative_space(window, spawn_space);
+                    } else {
+                        self.send_layout_event(LayoutEvent::WindowAdded(space, window));
+                    }
+                    self.send_layout_event(LayoutEvent::WindowFocused(spawn_space, window));
                     self.workspace_switch_manager.pending_workspace_mouse_warp = Some(window);
                     self.raise_window(window, Quiet::No, None);
                 }

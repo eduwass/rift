@@ -81,6 +81,13 @@ pub struct VirtualWorkspaceSettings {
     pub default_workspace: usize,
     #[serde(default)]
     pub reapply_app_rules_on_title_change: bool,
+    /// When true, a newly created tiled window joins the active workspace of
+    /// the display the user is currently on, instead of the active workspace
+    /// of whichever display the app materialized the window's frame on (apps
+    /// that restore their previous frame, e.g. editors, can otherwise spawn
+    /// onto another display's workspace and drag focus there).
+    #[serde(default)]
+    pub spawn_in_focused_workspace: bool,
     /// When true, windows float by default and an app_rule with `floating = false`
     /// opts an app into tiling (whitelist mode). When false (default), windows tile
     /// by default and an app_rule with `floating = true` floats an app (blacklist mode).
@@ -160,6 +167,7 @@ impl Default for VirtualWorkspaceSettings {
             workspace_names: default_workspace_names(),
             default_workspace: 0,
             reapply_app_rules_on_title_change: false,
+            spawn_in_focused_workspace: false,
             default_floating: false,
             app_rules: Vec::new(),
             workspace_rules: Vec::new(),
@@ -1544,6 +1552,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_in_focused_workspace_defaults_off_and_parses() {
+        let settings: VirtualWorkspaceSettings = toml::from_str("").unwrap();
+        assert!(!settings.spawn_in_focused_workspace);
+
+        let settings: VirtualWorkspaceSettings =
+            toml::from_str("spawn_in_focused_workspace = true").unwrap();
+        assert!(settings.spawn_in_focused_workspace);
+    }
 
     #[test]
     fn scrolling_defaults_to_nearly_full_width_columns() {

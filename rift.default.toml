@@ -263,9 +263,13 @@ drag_swap_fraction = 0.3
 # - workspace_auto_back_and_forth: when enabled, if you try to switch to the same workspace
 #   that's already active, it will switch to the last workspace instead
 # - reapply_app_rules_on_title_change: if true, app rules are re-evaluated when a window's title changes
+# - spawn_in_focused_workspace: when true, a newly created tiled window joins the active
+#   workspace of the display the user is currently on, instead of the active workspace of
+#   whichever display the app placed the window's frame on
 enabled = true
 default_workspace_count = 4
 auto_assign_windows = true
+spawn_in_focused_workspace = false
 preserve_focus_per_workspace = true
 workspace_auto_back_and_forth = false
 reapply_app_rules_on_title_change = false
