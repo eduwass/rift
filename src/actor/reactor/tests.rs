@@ -2928,13 +2928,103 @@ fn workspace_switch_batches_all_windows_with_eui_enabled() {
         requests.iter().any(|req| {
             matches!(
                 req,
-                Request::SetBatchWindowFrame(frames, _, true)
+                Request::SetBatchWindowFrame(frames, _, true, _)
                     if frames.iter().any(|(wid, _)| *wid == WindowId::new(1, 1))
                         && frames.iter().any(|(wid, _)| *wid == WindowId::new(1, 2))
             )
         }),
         "expected workspace-switch batch to disable eui for both hidden and visible windows: {requests:?}"
     );
+}
+
+#[test]
+fn move_window_to_workspace_and_switch_is_one_manual_switch_with_quiet_moved_focus() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let moved = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    while raise_manager_rx.try_recv().is_ok() {}
+    let generation = reactor.workspace_switch_manager.workspace_switch_generation;
+
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::MoveWindowToWorkspaceAndSwitch {
+            workspace: 1,
+            window_id: Some(moved.idx.get()),
+        },
+    )));
+
+    assert_eq!(
+        reactor.workspace_switch_manager.workspace_switch_generation,
+        generation + 1
+    );
+    let requests: Vec<_> = std::iter::from_fn(|| raise_manager_rx.try_recv().ok())
+        .map(|(_, event)| event)
+        .collect();
+    assert!(requests.iter().any(|event| {
+        matches!(
+            event,
+            raise_manager::Event::RaiseRequest(RaiseRequest {
+                focus_window: Some((window, _)),
+                focus_quiet: Quiet::Yes,
+                ..
+            }) if *window == moved
+        )
+    }), "expected one quiet workspace-switch focus request for {moved:?}: {requests:?}");
+}
+
+#[test]
+fn focus_window_resolves_internal_id_from_window_server_id() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    let space = SpaceId::new(1);
+    let tracked = WindowId::new(1, 1);
+    let server_id = WindowServerId::new(99);
+
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+    ));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.state.windows.track_window_server_id(server_id, tracked);
+    while raise_manager_rx.try_recv().is_ok() {}
+
+    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+        window_id: WindowId::new(1, server_id.0),
+        window_server_id: Some(server_id),
+    })));
+
+    let (_, event) = raise_manager_rx.try_recv().expect("focus should use the raise manager");
+    assert!(matches!(
+        event,
+        raise_manager::Event::RaiseRequest(RaiseRequest {
+            focus_window: Some((window, _)),
+            ..
+        }) if window == tracked
+    ));
+
+    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+        window_id: WindowId::new(2, server_id.0),
+        window_server_id: Some(server_id),
+    })));
+    assert!(raise_manager_rx.try_recv().is_err(), "pid mismatch must fail closed");
 }
 
 #[test]
@@ -3050,7 +3140,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
                 Request::SetWindowFrame(req_wid, frame, _, true)
                     if *req_wid == wid && frame.same_as(hidden_target)
             ) || matches!(req,
-                Request::SetBatchWindowFrame(frames, _, true)
+                Request::SetBatchWindowFrame(frames, _, true, _)
                     if frames.iter().any(|(req_wid, frame)| *req_wid == wid && frame.same_as(hidden_target))
             )
         }),
@@ -3766,7 +3856,7 @@ fn moving_tiled_window_to_display_applies_destination_layout_after_transfer_fram
         .into_iter()
         .flat_map(|request| match request {
             Request::SetWindowFrame(wid, frame, _, _) if wid == moved => vec![frame],
-            Request::SetBatchWindowFrame(frames, _, _) => frames
+            Request::SetBatchWindowFrame(frames, _, _, _) => frames
                 .into_iter()
                 .filter_map(|(wid, frame)| (wid == moved).then_some(frame))
                 .collect(),
@@ -5330,6 +5420,7 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
     let mut apps = Apps::new();
     let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
         default_workspace_count: 2,
+        spawn_in_focused_workspace: true,
         ..crate::common::config::VirtualWorkspaceSettings::default()
     };
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
@@ -5401,7 +5492,48 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
             .virtual_workspace_manager()
             .workspace_for_window(&reactor.state.windows, space, omitted),
         Some(secondary_workspace),
-        "post-wake discovery without an app rule must retain the manual workspace"
+        "post-restore discovery must not let spawn-in-focused overwrite the restored workspace"
+    );
+}
+
+#[test]
+fn restored_inactive_workspace_survives_created_window_finalization() {
+    let mut apps = Apps::new();
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        spawn_in_focused_workspace: true,
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &workspace_cfg,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.config.virtual_workspaces = workspace_cfg;
+    let space = SpaceId::new(1);
+    let window = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+    ));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    let secondary = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)[1]
+        .0;
+    assert!(reactor.layout_manager.layout_engine.virtual_workspace_manager_mut()
+        .assign_window_to_workspace(&mut reactor.state.windows, space, window, secondary));
+
+    reactor.apply_event_outcome(EventOutcome::default().with_created_window_finalization(window));
+
+    assert_eq!(
+        reactor.state.windows.workspace_info_for_window(window).map(|info| info.workspace_id),
+        Some(secondary),
+        "spawn-in-focused must not overwrite an adopted inactive-workspace assignment"
     );
 }
 

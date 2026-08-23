@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -5,7 +6,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 use super::TransactionId;
-use crate::actor::app::{AppThreadHandle, Request, WindowId, pid_t};
+use crate::actor::app::{
+    AppThreadHandle, Request, WindowId, WindowServerUpdateTransaction, pid_t,
+};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::HashMap;
 use crate::sys::geometry::{Round, SameAs};
@@ -320,6 +323,7 @@ impl AnimationManager {
             window.frame_monotonic = target_frame;
         }
 
+        let update_transaction = Arc::new(WindowServerUpdateTransaction::new());
         for (pid, frames) in per_app {
             if frames.is_empty() {
                 continue;
@@ -357,7 +361,12 @@ impl AnimationManager {
             }
 
             let frames_to_send = frames.clone();
-            if let Err(e) = handle.send(Request::SetBatchWindowFrame(frames_to_send, txid, true)) {
+            if let Err(e) = handle.send(Request::SetBatchWindowFrame(
+                frames_to_send,
+                txid,
+                true,
+                update_transaction.clone(),
+            )) {
                 debug!(
                     ?pid,
                     ?e,

@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::num::NonZeroU32;
 use std::process::{self};
 
 use clap::{Parser, Subcommand};
@@ -143,6 +144,13 @@ enum WindowCommands {
     Focus {
         direction: String, // up, down, left, right
     },
+    /// Focus a specific window through Rift's serialized raise manager
+    FocusId {
+        /// Window server ID
+        window_id: u32,
+        /// Process ID that owns the window
+        pid: i32,
+    },
     /// Toggle window floating state
     ToggleFloat,
     /// Toggle whether the focused window stays above normal windows
@@ -180,6 +188,11 @@ enum WorkspaceCommands {
     Switch { workspace_id: usize },
     /// Move current window to workspace
     MoveWindow {
+        workspace_id: usize,
+        window_id: Option<u32>,
+    },
+    /// Move current window to workspace and switch to it
+    MoveWindowAndSwitch {
         workspace_id: usize,
         window_id: Option<u32>,
     },
@@ -582,6 +595,16 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::Focus { direction } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::MoveFocus(direction.into()),
         ))),
+        WindowCommands::FocusId { window_id, pid } => {
+            let idx = NonZeroU32::new(window_id)
+                .ok_or_else(|| "window_id must be non-zero".to_string())?;
+            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::FocusWindow {
+                    window_id: WindowId { pid, idx },
+                    window_server_id: Some(WindowServerId::new(window_id)),
+                },
+            )))
+        }
         WindowCommands::ToggleFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleWindowFloating,
         ))),
@@ -668,6 +691,14 @@ fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> 
                 window_id,
             }),
         )),
+        WorkspaceCommands::MoveWindowAndSwitch { workspace_id, window_id } => {
+            Ok(RiftCommand::Reactor(reactor::Command::Layout(
+                LC::MoveWindowToWorkspaceAndSwitch {
+                    workspace: workspace_id,
+                    window_id,
+                },
+            )))
+        }
         WorkspaceCommands::Create => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::CreateWorkspace,
         ))),
@@ -949,5 +980,31 @@ fn run_mach_subscription(event: String) -> Result<(), String> {
             }
             return Err(format!("Failed to write event output: {e}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn focus_id_routes_through_reactor_focus() {
+        let command = map_window_command(WindowCommands::FocusId {
+            window_id: 456,
+            pid: 123,
+        })
+        .unwrap();
+
+        let RiftCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::FocusWindow { window_id, window_server_id },
+        )) = command
+        else {
+            panic!("focus-id did not map to ReactorCommand::FocusWindow");
+        };
+        assert_eq!(
+            window_id,
+            WindowId { pid: 123, idx: NonZeroU32::new(456).unwrap() }
+        );
+        assert_eq!(window_server_id, Some(WindowServerId::new(456)));
     }
 }

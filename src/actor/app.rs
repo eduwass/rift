@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::num::NonZeroU32;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -325,7 +325,12 @@ pub enum Request {
     CloseWindow(Option<WindowServerId>),
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
-    SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId, bool),
+    SetBatchWindowFrame(
+        Vec<(WindowId, CGRect)>,
+        TransactionId,
+        bool,
+        Arc<WindowServerUpdateTransaction>,
+    ),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
     AnimationFrame {
         wid: WindowId,
@@ -388,6 +393,7 @@ struct State {
     is_hidden: bool,
     is_frontmost: bool,
     active_animation_count: usize,
+    animation_update_transaction: Option<WindowServerUpdateTransaction>,
     raises_tx: actor::Sender<RaiseRequest>,
     tx_store: Option<WindowTxStore>,
     pending_frames: HashMap<WindowId, PendingFrame>,
@@ -408,6 +414,32 @@ struct PendingFrame {
     frame: CGRect,
     set_size: bool,
     txid: TransactionId,
+}
+
+static WINDOW_SERVER_UPDATE_COUNT: Mutex<usize> = Mutex::new(0);
+
+#[derive(Debug)]
+pub struct WindowServerUpdateTransaction;
+
+impl WindowServerUpdateTransaction {
+    pub(crate) fn new() -> Self {
+        let mut count = WINDOW_SERVER_UPDATE_COUNT.lock().unwrap_or_else(|e| e.into_inner());
+        if *count == 0 {
+            SLSDisableUpdate(*G_CONNECTION);
+        }
+        *count += 1;
+        Self
+    }
+}
+
+impl Drop for WindowServerUpdateTransaction {
+    fn drop(&mut self) {
+        let mut count = WINDOW_SERVER_UPDATE_COUNT.lock().unwrap_or_else(|e| e.into_inner());
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            SLSReenableUpdate(*G_CONNECTION);
+        }
+    }
 }
 
 impl State {
@@ -572,13 +604,18 @@ impl State {
         window.last_seen_txid = txid;
         if set_size {
             window.last_animation_frame = Some(frame);
-            let _ = window.elem.set_size(frame.size);
-            let _ = window.elem.set_position(frame.origin);
-            let _ = window.elem.set_size(frame.size);
+            Self::apply_window_frame(&window.elem, frame);
         } else {
             let _ = window.elem.set_position(frame.origin);
         }
         Ok(())
+    }
+
+    fn apply_window_frame(elem: &AXUIElement, frame: CGRect) {
+        // Moving can make macOS clamp the size, so reassert it after the position change.
+        let _ = elem.set_size(frame.size);
+        let _ = elem.set_position(frame.origin);
+        let _ = elem.set_size(frame.size);
     }
 
     fn flush_all_frames(&mut self) {
@@ -815,14 +852,10 @@ impl State {
 
                 if eui && !is_animating {
                     with_enhanced_ui_disabled(&self.app, || {
-                        let _ = elem.set_size(desired.size);
-                        let _ = elem.set_position(desired.origin);
-                        let _ = elem.set_size(desired.size);
+                        Self::apply_window_frame(&elem, desired);
                     });
                 } else {
-                    let _ = elem.set_size(desired.size);
-                    let _ = elem.set_position(desired.origin);
-                    let _ = elem.set_size(desired.size);
+                    Self::apply_window_frame(&elem, desired);
                 }
 
                 let frame =
@@ -839,7 +872,7 @@ impl State {
                     None,
                 ));
             }
-            Request::SetBatchWindowFrame(frames, txid, eui) => {
+            Request::SetBatchWindowFrame(frames, txid, eui, _update_transaction) => {
                 let disable_eui_for_batch = eui
                     && frames.iter().any(|(wid, _)| {
                         self.windows.get(wid).is_some_and(|window| !window.is_animating)
@@ -868,20 +901,14 @@ impl State {
 
                     if disable_eui_for_batch || (eui && !is_animating) {
                         if disable_eui_for_batch {
-                            let _ = elem.set_size(desired.size);
-                            let _ = elem.set_position(desired.origin);
-                            let _ = elem.set_size(desired.size);
+                            Self::apply_window_frame(&elem, *desired);
                         } else {
                             with_enhanced_ui_disabled(&self.app, || {
-                                let _ = elem.set_size(desired.size);
-                                let _ = elem.set_position(desired.origin);
-                                let _ = elem.set_size(desired.size);
+                                Self::apply_window_frame(&elem, *desired);
                             });
                         }
                     } else {
-                        let _ = elem.set_size(desired.size);
-                        let _ = elem.set_position(desired.origin);
-                        let _ = elem.set_size(desired.size);
+                        Self::apply_window_frame(&elem, *desired);
                     }
 
                     let frame = match self
@@ -914,11 +941,10 @@ impl State {
                     self.active_animation_count += 1;
                 }
                 if started_animation && self.active_animation_count == 1 {
+                    self.animation_update_transaction = Some(WindowServerUpdateTransaction::new());
                     let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", false);
                 }
                 self.stop_notifications_for_animation(&elem);
-
-                SLSDisableUpdate(*G_CONNECTION);
             }
             Request::EndWindowAnimation(wid) => {
                 if let Err(err) = self.flush_frames(wid) {
@@ -951,15 +977,14 @@ impl State {
                     .txid_from_store(window_server_id)
                     .or_else(|| Self::some_txid(last_seen_txid));
                 if let Some(frame) = last_animation_frame {
-                    let _ = elem.set_size(frame.size);
-                    let _ = elem.set_position(frame.origin);
-                    let _ = elem.set_size(frame.size);
+                    Self::apply_window_frame(&elem, frame);
                 }
                 if ended_animation {
                     self.active_animation_count = self.active_animation_count.saturating_sub(1);
                 }
                 if ended_animation && self.active_animation_count == 0 {
                     let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
+                    self.animation_update_transaction = None;
                 }
                 self.restart_notifications_after_animation(&elem);
                 let frame =
@@ -974,7 +999,6 @@ impl State {
                     Requested(true),
                     None,
                 ));
-                SLSReenableUpdate(*G_CONNECTION);
             }
             Request::Raise(wids, token, sequence_id, quiet, kind) => {
                 self.raises_tx.send(RaiseRequest(wids, token, sequence_id, quiet, kind));
@@ -1758,6 +1782,7 @@ impl State {
         }
         if window.is_animating && self.active_animation_count == 0 {
             let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
+            self.animation_update_transaction = None;
         }
         Some(window)
     }
@@ -1825,6 +1850,7 @@ fn app_thread_main(
         is_hidden: false,
         is_frontmost: false,
         active_animation_count: 0,
+        animation_update_transaction: None,
         raises_tx,
         tx_store,
         pending_frames: HashMap::default(),

@@ -65,6 +65,7 @@ pub enum WmCmd {
     PrevWorkspace,
     SwitchToWorkspace(WorkspaceSelector),
     MoveWindowToWorkspace(WorkspaceSelector),
+    MoveWindowToWorkspaceAndSwitch(WorkspaceSelector),
     CreateWorkspace,
     SwitchToLastWorkspace,
 
@@ -186,6 +187,9 @@ impl WmController {
             Command(Wm(crate::actor::wm_controller::WmCmd::NextWorkspace))
                 | Command(Wm(crate::actor::wm_controller::WmCmd::PrevWorkspace))
                 | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToWorkspace(_)))
+                | Command(Wm(
+                    crate::actor::wm_controller::WmCmd::MoveWindowToWorkspaceAndSwitch(_)
+                ))
                 | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToLastWorkspace))
                 | SpaceStateUpdated(..)
         ) && let Some(tx) = &self.mission_control_tx
@@ -359,6 +363,32 @@ impl WmController {
                 } else {
                     tracing::warn!(
                         "Hotkey requested move window to workspace {:?} but it could not be resolved; ignoring",
+                        ws_sel
+                    );
+                }
+            }
+            Command(Wm(MoveWindowToWorkspaceAndSwitch(ws_sel))) => {
+                let maybe_index = match &ws_sel {
+                    WorkspaceSelector::Index(i) => Some(*i),
+                    WorkspaceSelector::Name(name) => self
+                        .config
+                        .config
+                        .virtual_workspaces
+                        .workspace_names
+                        .iter()
+                        .position(|n| n == name),
+                };
+
+                if let Some(workspace_index) = maybe_index {
+                    self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                        layout::LayoutCommand::MoveWindowToWorkspaceAndSwitch {
+                            workspace: workspace_index,
+                            window_id: None,
+                        },
+                    )));
+                } else {
+                    tracing::warn!(
+                        "Hotkey requested move window to workspace {:?} and switch but it could not be resolved; ignoring",
                         ws_sel
                     );
                 }

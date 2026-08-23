@@ -1821,9 +1821,18 @@ impl Reactor {
                 return Ok(EventOutcome::finalized_event(None, false, false, false));
             }
             Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
-                window_id,
+                mut window_id,
                 window_server_id,
             })) => {
+                if let Some(tracked) =
+                    window_server_id.and_then(|id| self.state.windows.tracked_window_id(id))
+                {
+                    if tracked.pid != window_id.pid {
+                        warn!(?window_id, ?tracked, "Focus window ignored: pid mismatch");
+                        return Ok(EventOutcome::finalized_event(None, false, false, false));
+                    }
+                    window_id = tracked;
+                }
                 let resolved_space = self.best_space_for_window_id(window_id).or_else(|| {
                     self.state.windows.window(window_id).and_then(|window| {
                         self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
@@ -1890,13 +1899,45 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Layout(command)) => {
-                let command_space = self.command_context_space();
+                let command_space = match &command {
+                    layout::LayoutCommand::MoveWindowToWorkspaceAndSwitch { window_id, .. } => {
+                        window_id
+                            .as_ref()
+                            .and_then(|idx| {
+                                let matching_spaces: Vec<_> = self
+                                    .state
+                                    .windows
+                                    .iter_workspace_assignments()
+                                    .filter_map(|(window, info)| {
+                                        (window.idx.get() == *idx).then_some(info.space)
+                                    })
+                                    .collect();
+                                let context_space = self.command_context_space();
+                                matching_spaces
+                                    .iter()
+                                    .copied()
+                                    .find(|space| Some(*space) == context_space)
+                                    .or_else(|| {
+                                        (matching_spaces.len() == 1).then(|| matching_spaces[0])
+                                    })
+                            })
+                            .or_else(|| {
+                                self.layout_manager
+                                    .layout_engine
+                                    .focused_window()
+                                    .and_then(|window| self.assigned_space_for_window_id(window))
+                            })
+                            .or_else(|| self.command_context_space())
+                    }
+                    _ => self.command_context_space(),
+                };
                 if let Some(space) = command_space
                     && matches!(
                         command,
                         layout::LayoutCommand::NextWorkspace(_)
                             | layout::LayoutCommand::PrevWorkspace(_)
                             | layout::LayoutCommand::SwitchToWorkspace(_)
+                            | layout::LayoutCommand::MoveWindowToWorkspaceAndSwitch { .. }
                             | layout::LayoutCommand::SwitchToLastWorkspace
                     )
                 {
@@ -2132,6 +2173,16 @@ impl Reactor {
                     .window(window)
                     .is_some_and(|state| state.matches_filter(WindowFilter::EffectivelyManageable))
                 {
+                    let assigned_to_inactive_workspace = self
+                        .state
+                        .windows
+                        .workspace_info_for_window(window)
+                        .is_some_and(|assignment| {
+                            self.layout_manager
+                                .layout_engine
+                                .active_workspace(assignment.space)
+                                != Some(assignment.workspace_id)
+                        });
                     // spawn_in_focused_workspace: apps that restore their previous
                     // frame (e.g. editors) can materialize a new window on a
                     // different display than the one the user is on; the window
@@ -2141,6 +2192,7 @@ impl Reactor {
                     // (floating windows keep their frame, so they stay put).
                     let spawn_space = if self.config.virtual_workspaces.spawn_in_focused_workspace
                         && !self.layout_manager.layout_engine.is_window_floating(window)
+                        && !assigned_to_inactive_workspace
                     {
                         self.workspace_command_space().unwrap_or(space)
                     } else {

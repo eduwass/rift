@@ -46,6 +46,7 @@ pub fn handle_command_layout(
         LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
+            | LayoutCommand::MoveWindowToWorkspaceAndSwitch { .. }
             | LayoutCommand::SwitchToLastWorkspace
     );
     let requires_workspace_space = matches!(
@@ -53,6 +54,7 @@ pub fn handle_command_layout(
         LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
+            | LayoutCommand::MoveWindowToWorkspaceAndSwitch { .. }
             | LayoutCommand::SetWorkspaceLayout { .. }
             | LayoutCommand::SetWorkspaceName { .. }
             | LayoutCommand::CreateWorkspace
@@ -76,6 +78,7 @@ pub fn handle_command_layout(
         LayoutCommand::NextWorkspace(_)
         | LayoutCommand::PrevWorkspace(_)
         | LayoutCommand::SwitchToWorkspace(_)
+        | LayoutCommand::MoveWindowToWorkspaceAndSwitch { .. }
         | LayoutCommand::SetWorkspaceLayout { .. }
         | LayoutCommand::SetWorkspaceName { .. }
         | LayoutCommand::CreateWorkspace
@@ -285,7 +288,11 @@ pub fn handle_command_reactor_focus_window(
         space_is_active,
     } = payload;
     let mut outcome = EventOutcome::finalized_event(None, false, false, false);
-    if state.windows.window(window_id).is_some() {
+    let is_tracked = window_server_id.map_or_else(
+        || state.windows.window(window_id).is_some(),
+        |server_id| state.windows.tracked_window_id(server_id) == Some(window_id),
+    );
+    if is_tracked {
         let Some(space) = resolved_space else {
             warn!(?window_id, "Focus window ignored: space unknown");
             return Ok(outcome);

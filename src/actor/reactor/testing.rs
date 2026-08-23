@@ -353,7 +353,7 @@ impl Apps {
                         ));
                     }
                 }
-                Request::SetBatchWindowFrame(frames, txid, _) => {
+                Request::SetBatchWindowFrame(frames, txid, _, _) => {
                     for (wid, frame) in frames {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;

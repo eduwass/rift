@@ -1609,6 +1609,38 @@ mod tests {
     }
 
     #[test]
+    fn move_window_to_workspace_and_switch_accepts_workspace_selectors() {
+        let cfg = Config::parse(
+            r#"
+            [settings]
+            animate = false
+
+            [keys]
+            "Alt + 1" = { move_window_to_workspace_and_switch = 1 }
+            "Alt + 2" = { move_window_to_workspace_and_switch = "coding" }
+            "#,
+        )
+        .unwrap();
+
+        assert!(cfg.keys.iter().any(|(_, command)| {
+            command
+                == &WmCommand::Wm(
+                    crate::actor::wm_controller::WmCmd::MoveWindowToWorkspaceAndSwitch(
+                        WorkspaceSelector::Index(1),
+                    ),
+                )
+        }));
+        assert!(cfg.keys.iter().any(|(_, command)| {
+            command
+                == &WmCommand::Wm(
+                    crate::actor::wm_controller::WmCmd::MoveWindowToWorkspaceAndSwitch(
+                        WorkspaceSelector::Name("coding".into()),
+                    ),
+                )
+        }));
+    }
+
+    #[test]
     fn serde_round_trip_preserves_key_specs() {
         let cfg = Config::default();
         assert!(!cfg.key_specs.is_empty());
